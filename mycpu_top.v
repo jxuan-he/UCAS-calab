@@ -376,13 +376,15 @@ wire [31:0] mem_final_result = mem_res_from_mem ? data_sram_rdata : mem_alu_resu
 assign mem_ready_go = 1'b1;
 assign wb_allowin   = 1'b1;     // WB 是最后一级，恒允许接收
 assign mem_fire     = mem_valid && mem_ready_go && wb_allowin;
+assign wb_fire      = wb_valid && wb_allowin;   // 末级打出：wb_allowin 恒 1 时退化为 wb_valid
 
+// wb_valid：与其他四级同构的“进则置、出则清”模板
 always @(posedge clk) begin
     if (!resetn)
         wb_valid <= 1'b0;
     else if (mem_fire)
         wb_valid <= 1'b1;
-    else
+    else if (wb_fire)
         wb_valid <= 1'b0;
 end
 
