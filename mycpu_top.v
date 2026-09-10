@@ -121,6 +121,8 @@ assign if2_fire    = if2_valid && id_allowin;
 always @(posedge clk) begin
     if (!resetn)
         if2_valid <= 1'b0;
+    else if (exe_br_taken)   // 分支冲刷：压过 if1_fire，拒收在途错误指令
+        if2_valid <= 1'b0;
     else if (if1_fire)
         if2_valid <= 1'b1;
     else if (if2_fire)
@@ -156,12 +158,16 @@ end
 
 // ================== 3. IF2 -> ID 级间寄存器 ==================
 
-// id_valid：fire 进则置位，fire 出则清零（同构状态机）
+// id_valid：fire 进则置位，fire 出则清零；分支冲刷最高优先级
 always @(posedge clk) begin
     if (!resetn)
         id_valid <= 1'b0;
-    else if (id_allowin)
-        id_valid <= if2_fire;
+    else if (exe_br_taken)   // 分支冲刷：ID级错误指令作废
+        id_valid <= 1'b0;
+    else if (if2_fire)
+        id_valid <= 1'b1;
+    else if (id_fire)
+        id_valid <= 1'b0;
 end
 
 // 数据锁存：只在 if2_fire 时更新
@@ -248,8 +254,12 @@ wire        id_fire       = id_valid && id_ready_go && exe_allowin;
 always @(posedge clk) begin
     if (!resetn)
         exe_valid <= 1'b0;
-    else if (exe_allowin)
-        exe_valid <= id_fire;
+    else if (exe_br_taken)   // 分支冲刷：压过 id_fire，挡住当拍正试图进入EXE的错误指令
+        exe_valid <= 1'b0;
+    else if (id_fire)
+        exe_valid <= 1'b1;
+    else if (exe_fire)
+        exe_valid <= 1'b0;
 end
 
 
@@ -312,10 +322,12 @@ alu u_alu (
 );
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0
+// 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
 wire exe_rj_eq_rkd = (exe_alu_result == 32'b0);
-assign exe_br_taken = (exe_is_beq && exe_rj_eq_rkd) ||
-                      (exe_is_bne && !exe_rj_eq_rkd) ||
-                      exe_is_jirl || exe_is_bl || exe_is_b;
+assign exe_br_taken = exe_valid &&
+                      ((exe_is_beq && exe_rj_eq_rkd) ||
+                       (exe_is_bne && !exe_rj_eq_rkd) ||
+                       exe_is_jirl || exe_is_bl || exe_is_b);
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
 assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we);
@@ -333,8 +345,10 @@ assign exe_fire     = exe_valid && exe_ready_go && mem_allowin;
 always @(posedge clk) begin
     if (!resetn)
         mem_valid <= 1'b0;
-    else if (mem_allowin)
-        mem_valid <= exe_fire;
+    else if (exe_fire)
+        mem_valid <= 1'b1;
+    else if (mem_fire)
+        mem_valid <= 1'b0;
 end
 
 // 数据锁存：只在 exe_fire 时更新
@@ -366,8 +380,10 @@ assign mem_fire     = mem_valid && mem_ready_go && wb_allowin;
 always @(posedge clk) begin
     if (!resetn)
         wb_valid <= 1'b0;
-    else if (wb_allowin)
-        wb_valid <= mem_fire;
+    else if (mem_fire)
+        wb_valid <= 1'b1;
+    else
+        wb_valid <= 1'b0;
 end
 
 always @(posedge clk) begin
