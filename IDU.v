@@ -115,8 +115,15 @@ module IDU(
     assign dest         = inst_bl ? 5'd1 : rd;
 
     // ================== 8. 寄存器读地址 ==================
-    assign rf_raddr1 = rj;
-    assign rf_raddr2 = src_reg_is_rd ? rd : rk;
+    // 真实读使能：不读寄存器的指令把读地址用位掩码钳到 r0，r0 天然无相关，
+    // 使下游冲突检测退化为纯等值比较（配合 dest != 0 排除）
+    wire need_rj  = ~inst_b & ~inst_bl & ~inst_lu12i_w;
+    wire need_rkd = inst_add_w | inst_sub_w | inst_slt  | inst_sltu |
+                    inst_nor   | inst_and   | inst_or   | inst_xor  |
+                    inst_beq   | inst_bne   | inst_st_w;
+
+    assign rf_raddr1 = {5{need_rj}} & rj;
+    assign rf_raddr2 = {5{need_rkd}} & (src_reg_is_rd ? rd : rk);
 
     // ================== 9. 跳转目标地址（ID级计算） ==================
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc + br_offs) :
