@@ -22,10 +22,18 @@ always @(posedge clk) begin
 end
 
 //READ OUT 1
-assign rdata1 = (raddr1==5'b0) ? 32'b0 : rf[raddr1];
+// 写读同址旁路：WB 写与 ID 读同拍时，读口直通写入值（等价于“写前半拍、读后半拍”）
+// 位掩码实现：fwd 命中给 wdata；raddr==r0 恒读 0；否则读 rf 数组
+wire fwd1 = we & (waddr != `ADDR_WIDTH'b0) & (waddr == raddr1);   // fwd 蕴含 raddr1 != r0
+wire rd1  = (raddr1 != `ADDR_WIDTH'b0);
+assign rdata1 = ({`DATA_WIDTH{fwd1       }} & wdata)
+              | ({`DATA_WIDTH{rd1 & ~fwd1}} & rf[raddr1]);
 
 //READ OUT 2
-assign rdata2 = (raddr2==5'b0) ? 32'b0 : rf[raddr2];
+wire fwd2 = we & (waddr != `ADDR_WIDTH'b0) & (waddr == raddr2);
+wire rd2  = (raddr2 != `ADDR_WIDTH'b0);
+assign rdata2 = ({`DATA_WIDTH{fwd2       }} & wdata)
+              | ({`DATA_WIDTH{rd2 & ~fwd2}} & rf[raddr2]);
 
 endmodule
 
