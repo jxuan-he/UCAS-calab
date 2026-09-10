@@ -140,9 +140,9 @@ end
 // if2_inst：if2_fire 时清 NOP；if1_fire 的下一拍锁存 BRAM 数据
 always @(posedge clk) begin
     if (!resetn)
-        if2_inst <= 32'h0;
+        if2_inst <= 32'h0340_0000;   // andi $r0,$r0,0 = LoongArch NOP
     else if (if2_fire)
-        if2_inst <= 32'h0;
+        if2_inst <= 32'h0340_0000;   // 打出后本级清空为 NOP
     else if (if1_fire_r)
         if2_inst <= inst_sram_rdata;
 end
@@ -174,7 +174,7 @@ end
 always @(posedge clk) begin
     if (!resetn) begin
         id_pc   <= 32'h0;
-        id_inst <= 32'h0;
+        id_inst <= 32'h0340_0000;    // andi $r0,$r0,0 = LoongArch NOP
     end
     else if (if2_fire) begin
         id_pc   <= if2_pc_out;
