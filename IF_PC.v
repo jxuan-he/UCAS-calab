@@ -47,13 +47,6 @@ module IF_PC(
             pend_valid <= 1'b0;
     end
 
-    // ================== next_pc：pc 的唯一数据源 ==================
-    // 三路互斥，位掩码无需优先级：
-    //   - pend_valid：挂起重定向装填（本拍 inst_sram_en=0 不 fire；存活期 1 拍内
-    //     前端被冲刷掏空，不可能有新 br_taken，故与第二路互斥）
-    //   - br_taken：当拍判出的跳转
-    //   - 默认 pc+4 顺序流
-    // pc 的更新条件也随之统一：pending 装填拍 或 正常 fire 拍
     reg  [31:0] pc;
 
     wire [31:0] next_pc = {32{ pend_valid             }} & pend_target
@@ -74,7 +67,8 @@ module IF_PC(
     // 语义：IF2 能收我就读，复位期间不读。
     // pend 装填拍也照常发请求（握手连续性：已发起的事务不可撤回，
     // 将来换真实内存亦然），错误路径的响应由 if1_kill 标记、IF2 丢弃
-    assign inst_sram_en   = if2_allowin & resetn;
+    // assign inst_sram_en   = if2_allowin & resetn;
+    assign inst_sram_en   = resetn;
     assign if1_kill       = pend_valid | br_taken;
 
 endmodule

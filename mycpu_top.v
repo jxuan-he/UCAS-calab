@@ -26,7 +26,7 @@ wire [31:0] if1_pc;
 wire        if1_fire;
 wire        if1_kill;      // IF1 侧标记：本拍 fire 的地址是错误路径
 reg         if1_fire_r;
-reg         if1_kill_r;    // 延迟一拍，标记本次到达的响应该丢弃
+reg         if1_kill_r;    // 标记本次到达的响应该丢弃
 
 // IF2
 wire        if2_fire;
@@ -188,23 +188,29 @@ always @(posedge clk) begin
         if2_inst <= inst_sram_rdata;
 end
 
-// if1_fire / if1_kill 各延迟一拍：分别标记 BRAM 数据到达、该响应该丢弃
 always @(posedge clk) begin
     if (!resetn) begin
-        if1_fire_r <= 1'b0;
         if1_kill_r <= 1'b0;
     end
     else if (if1_fire) begin
-        if1_fire_r <= 1'b1;
         if1_kill_r <= if1_kill;
     end
     else if (if2_fire) begin
-        if1_fire_r <= 1'b0;
         if1_kill_r <= 1'b0;
     end
 end
 
-
+always @(posedge clk) begin
+    if (!resetn) begin
+        if1_fire_r <= 1'b0;
+    end
+    else if (if1_fire) begin
+        if1_fire_r <= 1'b1;
+    end
+    else  begin
+        if1_fire_r <= 1'b0;
+    end
+end
 // ================== 3. IF2 -> ID 级间寄存器 ==================
 
 // id_valid：fire 进则置位，fire 出则清零；分支冲刷最高优先级
@@ -225,8 +231,8 @@ always @(posedge clk) begin
         id_inst <= 32'h0340_0000;
     end
     else if (if2_fire) begin
-        id_pc   <= {32{!if1_kill_r}} & if2_pc_out;
-        id_inst <= {32{!if1_kill_r}} & if2_inst_out;
+        id_pc   <= if2_pc_out;
+        id_inst <= if2_inst_out;
     end
 end
 
