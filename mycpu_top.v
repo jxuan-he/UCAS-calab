@@ -159,7 +159,9 @@ assign if2_allowin = ~if2_valid || if2_fire || if1_kill_r;
 assign if1_fire    = inst_sram_en && if2_allowin;
 assign id_ready_go = ~id_stall;
 assign id_allowin  = ~id_valid || (id_ready_go && exe_allowin);
-assign if2_fire    = if2_valid && id_allowin;
+// kill 标记的槽位是错误路径响应：允许被新请求覆盖（见 if2_allowin），但绝不允许流向 ID
+// （exp8 纯阻塞下 bl/jirl 在 EXE 与 ID 阻塞同拍会触发 pend，kill 槽位到达时 ID 已空，不加门控会漏进 ID）
+assign if2_fire    = if2_valid && id_allowin && ~if1_kill_r;
 
 always @(posedge clk) begin
     if (!resetn)
