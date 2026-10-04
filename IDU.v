@@ -124,9 +124,8 @@ module IDU(
     wire need_si26 = inst_b      | inst_bl;
     wire src2_is_4 = inst_jirl   | inst_bl;
 
-    // 四选一位掩码 MUX：src2=4 / si20 / ui12 / si12格式 四种立即数来源 one-hot 互斥
-    // 注意：si12 格式一项必须含 need_ui5——slli/srli/srai 的移位量 sa 在 i12 低 5 位，
-    // 原嵌套写法的兜底分支同时服务 si12 和 ui5 两类，漏掉 ui5 会导致移位量恒 0
+    // 位掩码四选一：4 / si20 / ui12 / si12格式，one-hot 互斥
+    // si12 项必须含 need_ui5：移位量 sa 在 i12 低 5 位，与 si12 共用扩展通路
     assign imm = ({32{src2_is_4}} & 32'h4                     )
                | ({32{need_si20}} & {i20[19:0], 12'b0}       )
                | ({32{need_ui12}} & {20'b0, i12[11:0]}       )

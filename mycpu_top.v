@@ -115,9 +115,9 @@ reg  [31:0] mem_pc;
 reg  [31:0] mem_alu_result;
 reg         mem_res_from_mem;
 reg         mem_gr_we;
-reg         mem_is_mul;      // MEM 级是乘法（乘积在 mul_prod_mem）
+reg         mem_is_mul;      // MEM 级是乘法
 reg         mem_is_mulh;     // MEM 级是取高位的乘法
-reg  [63:0] mul_prod_mem;    // 乘积流水寄存器：EXE→MEM 沿锁存，等 DSP 吸收
+reg  [63:0] mul_prod_mem;    // 乘积流水寄存器，与指令同拍进 MEM 级
 reg  [ 4:0] mem_dest;
 
 // WB 级间寄存器
@@ -142,7 +142,7 @@ wire [ 1:0] fwd1_sel;
 wire [ 1:0] fwd2_sel;
 wire [31:0] exe_alu_result;    // EXE 组合结果，前递源之一
 wire [31:0] exe_result;        // EXE 最终输出：ALU/除 二选一（乘法走 mul_prod_mem）
-wire        exe_is_mul;         // EXE 级是乘法（结果迟到型，见 control.v）
+wire        exe_is_mul;    // 乘法（结果迟到型，见 control.v）
 wire [31:0] mem_final_result;  // MEM 组合结果，前递源之一
 
 wire [31:0] alu_src1;
@@ -409,12 +409,8 @@ alu u_alu (
 );
 
 // ================== 乘法器（exp10，行为级 *，综合进 DSP48） ==================
-// 33 位统一有符号乘法：有符号扩符号位、无符号乘补 0，66 位积弃高 2 位
-// mul.w 的低 32 位与有/无符号无关，故只有 mulh 两条需要区分
-// 时序教训（exp10 初版 WNS -1.53ns）：33x33 = 2 个 DSP 级联 + fabric CARRY4 长尾，
-// 再串 exe_result MUX 伸到 br_target/前递/MEM 锁存等 488 个端点，100MHz 收不掉。
-// 改造：乘积在 EXE→MEM 沿打一拍（mul_prod_mem，供 Vivado 吸进 DSP 内部 PREG/MREG），
-// 结果移出组合 exe_result；mul 在 control.v 里与 load 同构为「结果迟到型」。
+// 33 位统一有符号乘：无符号乘补 0；mul.w 低 32 位与符号无关，仅 mulh 需区分高低位
+// 乘积在 EXE→MEM 沿打一拍（单周期 33x33 收不进 100MHz）；mul 与 load 同构为结果迟到型
 assign    exe_is_mul  = exe_is_mul_w | exe_is_mulh_w | exe_is_mulh_wu;
 wire        exe_is_mulh = exe_is_mulh_w | exe_is_mulh_wu;
 wire [32:0] mul_a       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src1[31], exe_alu_src1};
@@ -422,13 +418,10 @@ wire [32:0] mul_b       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src2[31], exe_alu_src
 wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
 
 // ================== 除法器（exp10，Xilinx Divider Generator IP × 1） ==================
-// 只配一个无符号 IP：有符号除法先取绝对值送入，符号位启动拍锁存，出结果时恢复
-// （商符号 = 两操作数异或，余数符号跟随被除数——手册规定）
-// 反过来用有符号 IP 无法直接支持 div.wu/mod.wu（操作数 MSB 置位时会被误解为负数），
-// 而无符号 IP + 外层符号恢复可同时覆盖有/无符号四条指令，故选无符号。
-// 除数为 0 时手册规定"结果可以为任意值，但不触发例外"，故不做任何特判。
-// tvalid 握手成功后必须撤销，否则 IP 认为来了新任务；div_doing 保证一次只启动一单。
-// EXE 内指令是全流水最老的，不可能被冲刷，故除法器无需取消机制。
+// 无符号 IP + 外层符号处理：有符号除法取绝对值送入，启动拍锁存符号，出结果恢复
+// （商符号=两操作数异或，余数符号随被除数；有符号 IP 无法支持 div.wu/mod.wu，故选无符号）
+// 除数为 0 手册规定结果为任意值、不触发例外，不做特判
+// EXE 指令是全流水最老、不会被冲刷，故除法器无需取消机制
 wire        exe_is_div     = exe_is_div_w | exe_is_mod_w | exe_is_div_wu | exe_is_mod_wu;
 wire        exe_div_uns    = exe_is_div_wu | exe_is_mod_wu;
 reg         div_doing;
@@ -438,7 +431,7 @@ reg         div_r_neg;     // 余数应为负
 wire [31:0] div_a_abs = (~exe_div_uns & exe_alu_src1[31]) ? ~exe_alu_src1 + 32'd1 : exe_alu_src1;
 wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd1 : exe_alu_src2;
 
-// NonBlocking 模式下 IP 无 tready：tvalid 打一拍即被无条件接收，启动拍 = div_tvalid 本身
+// NonBlocking 模式无 tready：tvalid 打一拍即被接收；div_doing 保证一次只启动一单
 wire        div_tvalid = exe_valid & exe_is_div & ~div_doing;
 wire        div_dout_tvalid;
 wire [63:0] div_dout_tdata;
@@ -469,15 +462,14 @@ div_gen u_div (
     .m_axis_dout_tdata      (div_dout_tdata)
 );
 
-// IP 输出布局：[63:32]=商，[31:0]=余数；按启动时锁存的符号恢复
+// IP 输出 [63:32]=商 [31:0]=余数；按启动时锁存的符号恢复
 wire [31:0] quo_raw = div_dout_tdata[63:32];
 wire [31:0] rem_raw = div_dout_tdata[31:0];
 wire [31:0] quo     = div_q_neg ? ~quo_raw + 32'd1 : quo_raw;
 wire [31:0] rem     = div_r_neg ? ~rem_raw + 32'd1 : rem_raw;
 wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 
-// EXE 最终输出：ALU / 除 二选一（乘法结果走 mul_prod_mem 流水寄存器，不在此列）
-// 下游（MEM 锁存、前递源）统一看 exe_result
+// EXE 最终输出（ALU/除；乘法走 mul_prod_mem），下游 MEM 锁存与前递统一看 exe_result
 assign exe_result = exe_is_div ? div_result : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0
@@ -527,7 +519,7 @@ always @(posedge clk) begin
         mem_res_from_mem <= exe_res_from_mem;
         mem_gr_we        <= exe_gr_we;
         mem_dest         <= exe_dest;
-        mem_is_mul       <= exe_is_mul;   // 乘积与指令同拍搭车进 MEM 级
+        mem_is_mul       <= exe_is_mul;
         mem_is_mulh      <= exe_is_mulh;
         mul_prod_mem     <= mul_prod[63:0];
     end
@@ -535,7 +527,7 @@ end
 
 // ================== 11. MEM 级组合逻辑 ==================
 
-// 三选一位掩码 MUX：load 数据 / 乘积（高低位）/ ALU 结果，one-hot 互斥，同 rf_rdata_fwd 风格
+// 位掩码三选一：load 数据 / 乘积 / ALU 结果，one-hot 互斥
 assign mem_final_result = ({32{mem_res_from_mem        }} & data_sram_rdata     )
                         | ({32{mem_is_mul & mem_is_mulh}} & mul_prod_mem[63:32] )
                         | ({32{mem_is_mul & ~mem_is_mulh}} & mul_prod_mem[31:0] )
