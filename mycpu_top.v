@@ -56,6 +56,8 @@ wire        id_res_from_mem;
 wire        id_gr_we;
 wire        id_mem_we;
 wire [ 4:0] id_dest;
+wire [ 1:0] id_mem_size;
+wire        id_ld_uns;
 wire [31:0] id_br_target;
 wire        id_is_beq;
 wire        id_is_bne;
@@ -99,6 +101,8 @@ reg         exe_mem_we;
 reg         exe_res_from_mem;
 reg         exe_gr_we;
 reg  [ 4:0] exe_dest;
+reg  [ 1:0] exe_mem_size;
+reg         exe_ld_uns;
 reg         exe_is_beq;
 reg         exe_is_bne;
 reg         exe_is_jirl;
@@ -123,6 +127,8 @@ reg  [31:0] mem_pc;
 reg  [31:0] mem_alu_result;
 reg         mem_res_from_mem;
 reg         mem_gr_we;
+reg  [ 1:0] mem_mem_size;
+reg         mem_ld_uns;
 reg         mem_is_mul;      // MEM 级是乘法
 reg         mem_is_mulh;     // MEM 级是取高位的乘法
 reg  [63:0] mul_prod_mem;    // 乘积流水寄存器，与指令同拍进 MEM 级
@@ -134,6 +140,11 @@ reg  [31:0] wb_pc;
 reg  [31:0] wb_final_result;
 reg         wb_gr_we;
 reg  [ 4:0] wb_dest;
+reg  [31:0] wb_sram_rdata;   // load 原始数据，统一 WB 拍交付
+reg  [ 1:0] wb_addr_low;     // load 地址低位
+reg  [ 1:0] wb_mem_size;
+reg         wb_ld_uns;
+reg         wb_res_from_mem;
 
 // regfile 端口
 wire [31:0] rf_rdata1;
@@ -282,6 +293,8 @@ IDU u_IDU (
     .gr_we        (id_gr_we),
     .mem_we       (id_mem_we),
     .dest         (id_dest),
+    .mem_size     (id_mem_size),
+    .ld_uns       (id_ld_uns),
     .br_target    (id_br_target),
     .is_beq       (id_is_beq),
     .is_bne       (id_is_bne),
@@ -338,6 +351,7 @@ control u_control(
     .mem_valid        (mem_valid),
     .mem_gr_we        (mem_gr_we),
     .mem_dest         (mem_dest),
+    .mem_res_from_mem (mem_res_from_mem),
     .id_stall         (id_stall),
     .fwd1_sel         (fwd1_sel),
     .fwd2_sel         (fwd2_sel)
@@ -369,6 +383,8 @@ always @(posedge clk) begin
         exe_res_from_mem <= 1'b0;
         exe_gr_we        <= 1'b0;
         exe_dest         <= 5'h0;
+        exe_mem_size     <= 2'b0;
+        exe_ld_uns       <= 1'b0;
         exe_br_target    <= 32'h0;
         exe_is_beq       <= 1'b0;
         exe_is_bne       <= 1'b0;
@@ -397,6 +413,8 @@ always @(posedge clk) begin
         exe_res_from_mem <= id_res_from_mem;
         exe_gr_we        <= id_gr_we;
         exe_dest         <= id_dest;
+        exe_mem_size     <= id_mem_size;
+        exe_ld_uns       <= id_ld_uns;
         exe_br_target    <= id_br_target;
         exe_is_beq       <= id_is_beq;
         exe_is_bne       <= id_is_bne;
@@ -506,10 +524,16 @@ assign exe_br_taken = exe_valid &&
                        exe_is_jirl || exe_is_bl || exe_is_b);
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
+// 字节使能按地址低位移位（st.b 单道、st.h 半字对齐双道），写数据车道复制免对位
 assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we);
-assign data_sram_we    = exe_mem_we ? 4'hf : 4'h0;
+assign data_sram_we    = {4{exe_mem_we}} &
+                         (exe_mem_size[0] ? 4'b0001 <<  exe_alu_result[1:0]      :
+                          exe_mem_size[1] ? 4'b0011 << {exe_alu_result[1], 1'b0} :
+                                            4'hf);
 assign data_sram_addr  = exe_alu_result;
-assign data_sram_wdata = exe_rkd_value;
+assign data_sram_wdata = exe_mem_size[0] ? {4{exe_rkd_value[ 7:0]}} :
+                         exe_mem_size[1] ? {2{exe_rkd_value[15:0]}} :
+                                           exe_rkd_value;
 
 // ================== 10. EXE -> MEM 级间寄存器 ==================
 
@@ -533,6 +557,8 @@ always @(posedge clk) begin
         mem_alu_result   <= 32'h0;
         mem_res_from_mem <= 1'b0;
         mem_gr_we        <= 1'b0;
+        mem_mem_size     <= 2'b0;
+        mem_ld_uns       <= 1'b0;
         mem_dest         <= 5'h0;
         mem_is_mul       <= 1'b0;
         mem_is_mulh      <= 1'b0;
@@ -543,6 +569,8 @@ always @(posedge clk) begin
         mem_alu_result   <= exe_result;   // 已是 ALU/除 选完的最终结果
         mem_res_from_mem <= exe_res_from_mem;
         mem_gr_we        <= exe_gr_we;
+        mem_mem_size     <= exe_mem_size;
+        mem_ld_uns       <= exe_ld_uns;
         mem_dest         <= exe_dest;
         mem_is_mul       <= exe_is_mul;
         mem_is_mulh      <= exe_is_mulh;
@@ -552,11 +580,11 @@ end
 
 // ================== 11. MEM 级组合逻辑 ==================
 
-// 位掩码三选一：load 数据 / 乘积 / ALU 结果，one-hot 互斥
-assign mem_final_result = ({32{mem_res_from_mem        }} & data_sram_rdata     )
-                        | ({32{mem_is_mul & mem_is_mulh}} & mul_prod_mem[63:32] )
+// load 统一 WB 拍交付：BRAM 出数当拍只锁存 wb_sram_rdata，不供前递——
+// BRAM→前递→ID/EXE 锁存（含 jirl 目标加法器）路径时序不收，抽取/写回全放 WB 级
+assign mem_final_result = ({32{mem_is_mul & mem_is_mulh}} & mul_prod_mem[63:32] )
                         | ({32{mem_is_mul & ~mem_is_mulh}} & mul_prod_mem[31:0] )
-                        | ({32{~mem_res_from_mem & ~mem_is_mul}} & mem_alu_result);
+                        | ({32{~mem_is_mul}} & mem_alu_result);
 
 // ================== 12. MEM -> WB 级间寄存器 ==================
 
@@ -580,24 +608,43 @@ always @(posedge clk) begin
         wb_final_result <= 32'h0;
         wb_gr_we        <= 1'b0;
         wb_dest         <= 5'h0;
+        wb_sram_rdata   <= 32'h0;
+        wb_addr_low     <= 2'b0;
+        wb_mem_size     <= 2'b0;
+        wb_ld_uns       <= 1'b0;
+        wb_res_from_mem <= 1'b0;
     end
     else if (mem_fire) begin
         wb_pc           <= mem_pc;
         wb_final_result <= mem_final_result;
         wb_gr_we        <= mem_gr_we;
         wb_dest         <= mem_dest;
+        wb_sram_rdata   <= data_sram_rdata;
+        wb_addr_low     <= mem_alu_result[1:0];
+        wb_mem_size     <= mem_mem_size;
+        wb_ld_uns       <= mem_ld_uns;
+        wb_res_from_mem <= mem_res_from_mem;
     end
 end
 
 // ================== 13. WB 级组合逻辑 ==================
 
+// load 数据统一在此拍交付：按地址低位抽字节/半字并扩展（ld.bu/ld.hu 零扩展；字直通）
+// 消费者 d=1/d=2 均停住等待，本拍由 regfile 写读旁路供给 wb_result
+wire [ 7:0] wb_ld_byte = wb_sram_rdata[wb_addr_low*8 +: 8];
+wire [15:0] wb_ld_half = wb_addr_low[1] ? wb_sram_rdata[31:16] : wb_sram_rdata[15:0];
+wire [31:0] wb_ld_data = wb_mem_size[0] ? {{24{~wb_ld_uns & wb_ld_byte[7]}}, wb_ld_byte} :
+                         wb_mem_size[1] ? {{16{~wb_ld_uns & wb_ld_half[15]}}, wb_ld_half} :
+                                          wb_sram_rdata;
+wire [31:0] wb_result  = wb_res_from_mem ? wb_ld_data : wb_final_result;
+
 assign rf_we    = wb_gr_we && wb_valid;
 assign rf_waddr = wb_dest;
-assign rf_wdata = wb_final_result;
+assign rf_wdata = wb_result;
 
 assign debug_wb_pc       = wb_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = wb_dest;
-assign debug_wb_rf_wdata = wb_final_result;
+assign debug_wb_rf_wdata = wb_result;
 
 endmodule
