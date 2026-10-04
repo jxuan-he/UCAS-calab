@@ -62,6 +62,10 @@ wire        id_is_bne;
 wire        id_is_jirl;
 wire        id_is_bl;
 wire        id_is_b;
+wire        id_is_blt;
+wire        id_is_bge;
+wire        id_is_bltu;
+wire        id_is_bgeu;
 wire        id_is_mul_w;
 wire        id_is_mulh_w;
 wire        id_is_mulh_wu;
@@ -100,6 +104,10 @@ reg         exe_is_bne;
 reg         exe_is_jirl;
 reg         exe_is_bl;
 reg         exe_is_b;
+reg         exe_is_blt;
+reg         exe_is_bge;
+reg         exe_is_bltu;
+reg         exe_is_bgeu;
 reg         exe_is_mul_w;
 reg         exe_is_mulh_w;
 reg         exe_is_mulh_wu;
@@ -280,6 +288,10 @@ IDU u_IDU (
     .is_jirl      (id_is_jirl),
     .is_bl        (id_is_bl),
     .is_b         (id_is_b),
+    .is_blt       (id_is_blt),
+    .is_bge       (id_is_bge),
+    .is_bltu      (id_is_bltu),
+    .is_bgeu      (id_is_bgeu),
     .is_mul_w     (id_is_mul_w),
     .is_mulh_w    (id_is_mulh_w),
     .is_mulh_wu   (id_is_mulh_wu),
@@ -363,6 +375,10 @@ always @(posedge clk) begin
         exe_is_jirl      <= 1'b0;
         exe_is_bl        <= 1'b0;
         exe_is_b         <= 1'b0;
+        exe_is_blt       <= 1'b0;
+        exe_is_bge       <= 1'b0;
+        exe_is_bltu      <= 1'b0;
+        exe_is_bgeu      <= 1'b0;
         exe_is_mul_w     <= 1'b0;
         exe_is_mulh_w    <= 1'b0;
         exe_is_mulh_wu   <= 1'b0;
@@ -387,6 +403,10 @@ always @(posedge clk) begin
         exe_is_jirl      <= id_is_jirl;
         exe_is_bl        <= id_is_bl;
         exe_is_b         <= id_is_b;
+        exe_is_blt       <= id_is_blt;
+        exe_is_bge       <= id_is_bge;
+        exe_is_bltu      <= id_is_bltu;
+        exe_is_bgeu      <= id_is_bgeu;
         exe_is_mul_w     <= id_is_mul_w;
         exe_is_mulh_w    <= id_is_mulh_w;
         exe_is_mulh_wu   <= id_is_mulh_wu;
@@ -472,12 +492,17 @@ wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 // EXE 最终输出（ALU/除；乘法走 mul_prod_mem），下游 MEM 锁存与前递统一看 exe_result
 assign exe_result = exe_is_div ? div_result : exe_alu_result;
 
-// 跳转判断：beq/bne 用 ALU sub 结果是否为 0
+// 跳转判断：beq/bne 用 ALU sub 结果是否为 0；blt/bge/bltu/bgeu 复用 slt/sltu 结果最低位
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
 assign exe_rj_eq_rkd = (exe_alu_result == 32'b0);
+wire   exe_rj_lt_rkd = exe_alu_result[0];
 assign exe_br_taken = exe_valid &&
-                      ((exe_is_beq && exe_rj_eq_rkd) ||
-                       (exe_is_bne && !exe_rj_eq_rkd) ||
+                      ((exe_is_beq  &&  exe_rj_eq_rkd) ||
+                       (exe_is_bne  && !exe_rj_eq_rkd) ||
+                       (exe_is_blt  &&  exe_rj_lt_rkd) ||
+                       (exe_is_bge  && !exe_rj_lt_rkd) ||
+                       (exe_is_bltu &&  exe_rj_lt_rkd) ||
+                       (exe_is_bgeu && !exe_rj_lt_rkd) ||
                        exe_is_jirl || exe_is_bl || exe_is_b);
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）

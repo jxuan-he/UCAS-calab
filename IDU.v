@@ -25,6 +25,10 @@ module IDU(
     output        is_jirl,
     output        is_bl,
     output        is_b,
+    output        is_blt,
+    output        is_bge,
+    output        is_bltu,
+    output        is_bgeu,
 
     // 乘除（exp10 B 类）
     output        is_mul_w,
@@ -100,12 +104,18 @@ module IDU(
     wire inst_div_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
     wire inst_mod_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 
+    // exp11：条件转移（2RI16，rd 域当源；复用 slt/sltu 比较）
+    wire inst_blt    = op_31_26_d[6'h18];
+    wire inst_bge    = op_31_26_d[6'h19];
+    wire inst_bltu   = op_31_26_d[6'h1a];
+    wire inst_bgeu   = op_31_26_d[6'h1b];
+
     // ================== 4. ALU 控制信号 ==================
     assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | inst_bl
                       | inst_pcaddu12i;
     assign alu_op[ 1] = inst_sub_w | inst_beq | inst_bne;
-    assign alu_op[ 2] = inst_slt  | inst_slti;
-    assign alu_op[ 3] = inst_sltu | inst_sltui;
+    assign alu_op[ 2] = inst_slt  | inst_slti | inst_blt  | inst_bge;
+    assign alu_op[ 3] = inst_sltu | inst_sltui | inst_bltu | inst_bgeu;
     assign alu_op[ 4] = inst_and  | inst_andi;
     assign alu_op[ 5] = inst_nor;
     assign alu_op[ 6] = inst_or   | inst_ori;
@@ -137,7 +147,8 @@ module IDU(
     wire [31:0] jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
     // ================== 6. 操作数选择控制 ==================
-    wire src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
+    wire src_reg_is_rd = inst_beq | inst_bne | inst_st_w |
+                         inst_blt | inst_bge | inst_bltu | inst_bgeu;
 
     assign src1_is_pc  = inst_jirl | inst_bl | inst_pcaddu12i;
     assign src2_is_imm = inst_slli_w | inst_srli_w | inst_srai_w |
@@ -148,7 +159,8 @@ module IDU(
 
     // ================== 7. 访存/写回控制 ==================
     assign res_from_mem = inst_ld_w;
-    assign gr_we        = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;  // bl要写r1
+    assign gr_we        = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b &
+                          ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;  // bl要写r1
     assign mem_we       = inst_st_w;
     assign dest         = inst_bl ? 5'd1 : rd;
 
@@ -161,14 +173,17 @@ module IDU(
                     inst_sll_w | inst_srl_w | inst_sra_w |          // 寄存器移位真读 rk
                     inst_mul_w | inst_mulh_w| inst_mulh_wu|          // 乘除全读 rj/rk
                     inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |
-                    inst_beq   | inst_bne   | inst_st_w;
+                    inst_beq   | inst_bne   |
+                    inst_blt   | inst_bge   | inst_bltu   | inst_bgeu  |  // 条件转移读 rd 域
+                    inst_st_w;
 
     assign rf_raddr1 = {5{need_rj}} & rj;
     assign rf_raddr2 = {5{need_rkd}} & (src_reg_is_rd ? rd : rk);
 
     // ================== 9. 跳转目标地址（ID级计算） ==================
-    assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc + br_offs) :
-                                                                     (rj_value + jirl_offs);
+    assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||
+                        inst_blt || inst_bge || inst_bltu || inst_bgeu) ? (pc + br_offs) :
+                                                                          (rj_value + jirl_offs);
 
     // ================== 10. 分支类型输出（给EX级判断跳不跳） ==================
     assign is_beq  = inst_beq;
@@ -176,6 +191,10 @@ module IDU(
     assign is_jirl = inst_jirl;
     assign is_bl   = inst_bl;
     assign is_b    = inst_b;
+    assign is_blt  = inst_blt;
+    assign is_bge  = inst_bge;
+    assign is_bltu = inst_bltu;
+    assign is_bgeu = inst_bgeu;
 
     // ================== 11. 乘除类型输出 ==================
     assign is_mul_w   = inst_mul_w;
