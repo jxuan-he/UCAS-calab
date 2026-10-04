@@ -48,7 +48,7 @@ module IDU(
     wire [ 3:0] op_21_20_d =  4'b1 << op_21_20;
     wire [31:0] op_19_15_d = 32'b1 << op_19_15;
 
-    // ================== 3. 指令识别（20条） ==================
+    // ================== 3. 指令识别（20 + exp10 A类9 = 29条） ==================
     wire inst_add_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h00];
     wire inst_sub_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h02];
     wire inst_slt    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h04];
@@ -70,29 +70,45 @@ module IDU(
     wire inst_bne    = op_31_26_d[6'h17];
     wire inst_lu12i_w= op_31_26_d[6'h05] & ~inst[25];
 
+    // exp10 A 类：算术逻辑扩展（全部复用现有 ALU 操作，alu_op 不扩位）
+    wire inst_slti     = op_31_26_d[6'h00] & op_25_22_d[4'h8];
+    wire inst_sltui    = op_31_26_d[6'h00] & op_25_22_d[4'h9];
+    wire inst_andi     = op_31_26_d[6'h00] & op_25_22_d[4'hd];
+    wire inst_ori      = op_31_26_d[6'h00] & op_25_22_d[4'he];
+    wire inst_xori     = op_31_26_d[6'h00] & op_25_22_d[4'hf];
+    // 寄存器移位（移位量来自 rk[4:0]），与 add/sub 同属 3R 运算组，靠 op_19_15 区分
+    wire inst_sll_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0e];
+    wire inst_srl_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
+    wire inst_sra_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
+    wire inst_pcaddu12i= op_31_26_d[6'h07];   // rd = pc + {si20,12'b0}
+
     // ================== 4. ALU 控制信号 ==================
-    assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | inst_bl;
+    assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | inst_bl
+                      | inst_pcaddu12i;
     assign alu_op[ 1] = inst_sub_w | inst_beq | inst_bne;
-    assign alu_op[ 2] = inst_slt;
-    assign alu_op[ 3] = inst_sltu;
-    assign alu_op[ 4] = inst_and;
+    assign alu_op[ 2] = inst_slt  | inst_slti;
+    assign alu_op[ 3] = inst_sltu | inst_sltui;
+    assign alu_op[ 4] = inst_and  | inst_andi;
     assign alu_op[ 5] = inst_nor;
-    assign alu_op[ 6] = inst_or;
-    assign alu_op[ 7] = inst_xor;
-    assign alu_op[ 8] = inst_slli_w;
-    assign alu_op[ 9] = inst_srli_w;
-    assign alu_op[10] = inst_srai_w;
+    assign alu_op[ 6] = inst_or   | inst_ori;
+    assign alu_op[ 7] = inst_xor  | inst_xori;
+    assign alu_op[ 8] = inst_slli_w | inst_sll_w;
+    assign alu_op[ 9] = inst_srli_w | inst_srl_w;
+    assign alu_op[10] = inst_srai_w | inst_sra_w;
     assign alu_op[11] = inst_lu12i_w;
 
     // ================== 5. 立即数生成 ==================
     wire need_ui5  = inst_slli_w | inst_srli_w | inst_srai_w;
-    wire need_si12 = inst_addi_w | inst_ld_w   | inst_st_w;
-    wire need_si20 = inst_lu12i_w;
+    // sltui 的 u 指"无符号比较"，立即数仍走符号扩展；零扩展只有逻辑运算三条
+    wire need_si12 = inst_addi_w | inst_slti | inst_sltui | inst_ld_w | inst_st_w;
+    wire need_ui12 = inst_andi | inst_ori | inst_xori;
+    wire need_si20 = inst_lu12i_w | inst_pcaddu12i;
     wire need_si26 = inst_b      | inst_bl;
     wire src2_is_4 = inst_jirl   | inst_bl;
 
     assign imm = src2_is_4 ? 32'h4 :
                  need_si20 ? {i20[19:0], 12'b0} :
+                 need_ui12 ? {20'b0, i12[11:0]} :
                              {{20{i12[11]}}, i12[11:0]};
 
     wire [31:0] br_offs   = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
@@ -103,10 +119,12 @@ module IDU(
     // ================== 6. 操作数选择控制 ==================
     wire src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
 
-    assign src1_is_pc  = inst_jirl | inst_bl;
+    assign src1_is_pc  = inst_jirl | inst_bl | inst_pcaddu12i;
     assign src2_is_imm = inst_slli_w | inst_srli_w | inst_srai_w |
-                         inst_addi_w | inst_ld_w   | inst_st_w   |
-                         inst_lu12i_w| inst_jirl   | inst_bl;
+                         inst_addi_w | inst_slti   | inst_sltui  |
+                         inst_andi  | inst_ori    | inst_xori   |
+                         inst_ld_w  | inst_st_w   |
+                         inst_lu12i_w| inst_jirl  | inst_bl     | inst_pcaddu12i;
 
     // ================== 7. 访存/写回控制 ==================
     assign res_from_mem = inst_ld_w;
@@ -117,9 +135,10 @@ module IDU(
     // ================== 8. 寄存器读地址 ==================
     // 真实读使能：不读寄存器的指令把读地址用位掩码钳到 r0，r0 天然无相关，
     // 使下游冲突检测退化为纯等值比较（配合 dest != 0 排除）
-    wire need_rj  = ~inst_b & ~inst_bl & ~inst_lu12i_w;
+    wire need_rj  = ~inst_b & ~inst_bl & ~inst_lu12i_w & ~inst_pcaddu12i;
     wire need_rkd = inst_add_w | inst_sub_w | inst_slt  | inst_sltu |
                     inst_nor   | inst_and   | inst_or   | inst_xor  |
+                    inst_sll_w | inst_srl_w | inst_sra_w |          // 寄存器移位真读 rk
                     inst_beq   | inst_bne   | inst_st_w;
 
     assign rf_raddr1 = {5{need_rj}} & rj;
