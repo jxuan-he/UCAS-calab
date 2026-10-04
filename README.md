@@ -35,6 +35,13 @@ ip/div_gen/    除法器 IP 产物（xci/dcp/仿真模型，免重建，见下�
 `../rtl/xilinx_ip/*/*.xci` glob 会自动收编，综合用 dcp、仿真用 sim/div_gen.vhd，
 无需再开 IP Catalog。
 
+> **版本注意**：入库的 IP 产物由 **Vivado 2023.2** 生成（div_gen_v5_1_20），且绑定
+> 器件 xc7a200tfbg676。若你的 Vivado **版本低于 2023.2**（或换了器件），低版本可能读不了
+> 高版本产物，请按讲义用 IP Catalog 自行生成一个**无符号 32 位除法器**：
+> Radix2 / Unsigned / 32÷32 / 勾 Remainder / 不勾除 0 检测 / NonBlocking（无 tready）/
+> Automatic latency / 不勾 ACLKEN ARESETN；**模块名必须叫 `div_gen`**，放回原位置后
+> RTL 例化和 glob 收编都会自动对上，无需改任何代码。
+
 EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→MEM 沿打一拍）、
 除法器（Divider Generator IP `div_gen`，无符号/NonBlocking，~37 拍驻留；
 有符号除法取绝对值送入、出结果按锁存符号恢复，余数符号跟随被除数）。
