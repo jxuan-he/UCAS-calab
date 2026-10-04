@@ -178,9 +178,9 @@ module IDU(
     assign mem_we       = is_st;
     assign dest         = inst_bl ? 5'd1 : rd;
 
-    assign mem_size = (inst_ld_b | inst_ld_bu | inst_st_b) ? 2'b01 :
-                      (inst_ld_h | inst_ld_hu | inst_st_h) ? 2'b10 :
-                                                             2'b00;
+    // mem_size 按位生成本身就是 one-hot：bit0=字节，bit1=半字，全 0=字
+    assign mem_size[0] = inst_ld_b | inst_ld_bu | inst_st_b;
+    assign mem_size[1] = inst_ld_h | inst_ld_hu | inst_st_h;
     assign ld_uns   = inst_ld_bu | inst_ld_hu;
 
     // ================== 8. 寄存器读地址 ==================

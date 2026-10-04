@@ -456,18 +456,17 @@ wire [32:0] mul_b       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src2[31], exe_alu_src
 wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
 
 // ================== 除法器（exp10，Xilinx Divider Generator IP × 1） ==================
-// 无符号 IP + 外层符号处理：有符号除法取绝对值送入，启动拍锁存符号，出结果恢复
-// （商符号=两操作数异或，余数符号随被除数；有符号 IP 无法支持 div.wu/mod.wu，故选无符号）
-// 除数为 0 手册规定结果为任意值、不触发例外，不做特判
-// EXE 指令是全流水最老、不会被冲刷，故除法器无需取消机制
+// 无符号 IP + 外层符号处理：有符号除法取绝对值送入，出结果恢复符号
+// 符号/绝对值全部组合现算：除法驻留期间 EXE 冻结（ready_go=0），操作数全程稳定
 wire        exe_is_div     = exe_is_div_w | exe_is_mod_w | exe_is_div_wu | exe_is_mod_wu;
 wire        exe_div_uns    = exe_is_div_wu | exe_is_mod_wu;
 reg         div_doing;
-reg         div_q_neg;     // 商应为负
-reg         div_r_neg;     // 余数应为负
 
 wire [31:0] div_a_abs = (~exe_div_uns & exe_alu_src1[31]) ? ~exe_alu_src1 + 32'd1 : exe_alu_src1;
 wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd1 : exe_alu_src2;
+// 商符号=两操作数异或，余数符号随被除数
+wire        div_q_neg = ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
+wire        div_r_neg = ~exe_div_uns &  exe_alu_src1[31];
 
 // NonBlocking 模式无 tready：tvalid 打一拍即被接收；div_doing 保证一次只启动一单
 wire        div_tvalid = exe_valid & exe_is_div & ~div_doing;
@@ -483,13 +482,6 @@ always @(posedge clk) begin
     else if (div_done)    div_doing <= 1'b0;
 end
 
-always @(posedge clk) begin
-    if (div_in_fire) begin
-        div_q_neg <= ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
-        div_r_neg <= ~exe_div_uns &  exe_alu_src1[31];
-    end
-end
-
 div_gen u_div (
     .aclk                   (clk),
     .s_axis_dividend_tvalid (div_tvalid),
@@ -500,7 +492,7 @@ div_gen u_div (
     .m_axis_dout_tdata      (div_dout_tdata)
 );
 
-// IP 输出 [63:32]=商 [31:0]=余数；按启动时锁存的符号恢复
+// IP 输出 [63:32]=商 [31:0]=余数；按符号恢复
 wire [31:0] quo_raw = div_dout_tdata[63:32];
 wire [31:0] rem_raw = div_dout_tdata[31:0];
 wire [31:0] quo     = div_q_neg ? ~quo_raw + 32'd1 : quo_raw;
@@ -512,32 +504,30 @@ assign exe_result = exe_is_div ? div_result : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0；blt/bge/bltu/bgeu 复用 slt/sltu 结果最低位
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
+// 位掩码：各分支类型 one-hot 互斥，条件位收集后归约或
 assign exe_rj_eq_rkd = (exe_alu_result == 32'b0);
 wire   exe_rj_lt_rkd = exe_alu_result[0];
-assign exe_br_taken = exe_valid &&
-                      ((exe_is_beq  &&  exe_rj_eq_rkd) ||
-                       (exe_is_bne  && !exe_rj_eq_rkd) ||
-                       (exe_is_blt  &&  exe_rj_lt_rkd) ||
-                       (exe_is_bge  && !exe_rj_lt_rkd) ||
-                       (exe_is_bltu &&  exe_rj_lt_rkd) ||
-                       (exe_is_bgeu && !exe_rj_lt_rkd) ||
-                       exe_is_jirl || exe_is_bl || exe_is_b);
+assign exe_br_taken = exe_valid & (exe_is_beq  &  exe_rj_eq_rkd
+                                 | exe_is_bne  & ~exe_rj_eq_rkd
+                                 | exe_is_blt  &  exe_rj_lt_rkd
+                                 | exe_is_bge  & ~exe_rj_lt_rkd
+                                 | exe_is_bltu &  exe_rj_lt_rkd
+                                 | exe_is_bgeu & ~exe_rj_lt_rkd
+                                 | exe_is_jirl | exe_is_bl | exe_is_b);
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
-// 字节使能按地址低位移位（st.b 单道、st.h 半字对齐双道），写数据车道复制免对位
+// 位掩码三选一：字节道移位（st.b 单道 / st.h 半字对齐双道 / st.w 全道），写数据车道复制免对位
 assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we);
-assign data_sram_we    = {4{exe_mem_we}} &
-                         (exe_mem_size[0] ? 4'b0001 <<  exe_alu_result[1:0]      :
-                          exe_mem_size[1] ? 4'b0011 << {exe_alu_result[1], 1'b0} :
-                                            4'hf);
+assign data_sram_we    = ({4{exe_mem_we & exe_mem_size[0]}} & (4'b0001 <<  exe_alu_result[1:0]     ))
+                       | ({4{exe_mem_we & exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1], 1'b0}))
+                       | ({4{exe_mem_we & ~|exe_mem_size  }} &  4'hf                                  );
 assign data_sram_addr  = exe_alu_result;
-assign data_sram_wdata = exe_mem_size[0] ? {4{exe_rkd_value[ 7:0]}} :
-                         exe_mem_size[1] ? {2{exe_rkd_value[15:0]}} :
-                                           exe_rkd_value;
+assign data_sram_wdata = ({32{exe_mem_size[0]}} & {4{exe_rkd_value[ 7:0]}})
+                       | ({32{exe_mem_size[1]}} & {2{exe_rkd_value[15:0]}})
+                       | ({32{~|exe_mem_size  }} &  exe_rkd_value        );
 
 // ================== 10. EXE -> MEM 级间寄存器 ==================
 
-// 除法驻留等待：结果未出则 EXE 不放行，整条流水线自然停住
 assign exe_ready_go = ~exe_is_div | div_done;
 assign mem_allowin  = ~mem_valid || (mem_ready_go && wb_allowin);
 assign exe_fire     = exe_valid && exe_ready_go && mem_allowin;
@@ -631,11 +621,16 @@ end
 
 // load 数据统一在此拍交付：按地址低位抽字节/半字并扩展（ld.bu/ld.hu 零扩展；字直通）
 // 消费者 d=1/d=2 均停住等待，本拍由 regfile 写读旁路供给 wb_result
-wire [ 7:0] wb_ld_byte = wb_sram_rdata[wb_addr_low*8 +: 8];
-wire [15:0] wb_ld_half = wb_addr_low[1] ? wb_sram_rdata[31:16] : wb_sram_rdata[15:0];
-wire [31:0] wb_ld_data = wb_mem_size[0] ? {{24{~wb_ld_uns & wb_ld_byte[7]}}, wb_ld_byte} :
-                         wb_mem_size[1] ? {{16{~wb_ld_uns & wb_ld_half[15]}}, wb_ld_half} :
-                                          wb_sram_rdata;
+wire [ 7:0] wb_ld_byte = ({8{wb_addr_low == 2'b00}} & wb_sram_rdata[ 7: 0])
+                       | ({8{wb_addr_low == 2'b01}} & wb_sram_rdata[15: 8])
+                       | ({8{wb_addr_low == 2'b10}} & wb_sram_rdata[23:16])
+                       | ({8{wb_addr_low == 2'b11}} & wb_sram_rdata[31:24]);
+wire [15:0] wb_ld_half = ({16{ wb_addr_low[1]}} & wb_sram_rdata[31:16])
+                       | ({16{~wb_addr_low[1]}} & wb_sram_rdata[15: 0]);
+wire [31:0] wb_ld_data = ({32{wb_mem_size[0]}} & {{24{~wb_ld_uns & wb_ld_byte[7]}}, wb_ld_byte})
+                       | ({32{wb_mem_size[1]}} & {{16{~wb_ld_uns & wb_ld_half[15]}}, wb_ld_half})
+                       | ({32{~|wb_mem_size  }} & wb_sram_rdata);
+
 wire [31:0] wb_result  = wb_res_from_mem ? wb_ld_data : wb_final_result;
 
 assign rf_we    = wb_gr_we && wb_valid;
