@@ -115,6 +115,9 @@ reg  [31:0] mem_pc;
 reg  [31:0] mem_alu_result;
 reg         mem_res_from_mem;
 reg         mem_gr_we;
+reg         mem_is_mul;      // MEM 级是乘法（乘积在 mul_prod_mem）
+reg         mem_is_mulh;     // MEM 级是取高位的乘法
+reg  [63:0] mul_prod_mem;    // 乘积流水寄存器：EXE→MEM 沿锁存，等 DSP 吸收
 reg  [ 4:0] mem_dest;
 
 // WB 级间寄存器
@@ -138,7 +141,8 @@ wire        id_stall;
 wire [ 1:0] fwd1_sel;
 wire [ 1:0] fwd2_sel;
 wire [31:0] exe_alu_result;    // EXE 组合结果，前递源之一
-wire [31:0] exe_result;        // EXE 最终输出：ALU/乘/除 三选一
+wire [31:0] exe_result;        // EXE 最终输出：ALU/除 二选一（乘法走 mul_prod_mem）
+wire        exe_is_mul;         // EXE 级是乘法（结果迟到型，见 control.v）
 wire [31:0] mem_final_result;  // MEM 组合结果，前递源之一
 
 wire [31:0] alu_src1;
@@ -317,6 +321,7 @@ control u_control(
     .exe_valid        (exe_valid),
     .exe_gr_we        (exe_gr_we),
     .exe_res_from_mem (exe_res_from_mem),
+    .exe_is_mul       (exe_is_mul),
     .exe_dest         (exe_dest),
     .mem_valid        (mem_valid),
     .mem_gr_we        (mem_gr_we),
@@ -403,14 +408,18 @@ alu u_alu (
     .alu_result (exe_alu_result)
 );
 
-// ================== 乘法器（exp10，行为级 *，综合进 DSP48，单周期） ==================
+// ================== 乘法器（exp10，行为级 *，综合进 DSP48） ==================
 // 33 位统一有符号乘法：有符号扩符号位、无符号乘补 0，66 位积弃高 2 位
 // mul.w 的低 32 位与有/无符号无关，故只有 mulh 两条需要区分
-wire        exe_is_mul  = exe_is_mul_w | exe_is_mulh_w | exe_is_mulh_wu;
+// 时序教训（exp10 初版 WNS -1.53ns）：33x33 = 2 个 DSP 级联 + fabric CARRY4 长尾，
+// 再串 exe_result MUX 伸到 br_target/前递/MEM 锁存等 488 个端点，100MHz 收不掉。
+// 改造：乘积在 EXE→MEM 沿打一拍（mul_prod_mem，供 Vivado 吸进 DSP 内部 PREG/MREG），
+// 结果移出组合 exe_result；mul 在 control.v 里与 load 同构为「结果迟到型」。
+assign    exe_is_mul  = exe_is_mul_w | exe_is_mulh_w | exe_is_mulh_wu;
+wire        exe_is_mulh = exe_is_mulh_w | exe_is_mulh_wu;
 wire [32:0] mul_a       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src1[31], exe_alu_src1};
 wire [32:0] mul_b       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src2[31], exe_alu_src2};
 wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
-wire [31:0] mul_result  = (exe_is_mulh_w | exe_is_mulh_wu) ? mul_prod[63:32] : mul_prod[31:0];
 
 // ================== 除法器（exp10，Xilinx Divider Generator IP × 1） ==================
 // 只配一个无符号 IP：有符号除法先取绝对值送入，符号位启动拍锁存，出结果时恢复
@@ -467,9 +476,9 @@ wire [31:0] quo     = div_q_neg ? ~quo_raw + 32'd1 : quo_raw;
 wire [31:0] rem     = div_r_neg ? ~rem_raw + 32'd1 : rem_raw;
 wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 
-// EXE 最终输出：ALU / 乘 / 除 三选一。下游（MEM 锁存、前递源）统一看 exe_result
-assign exe_result = exe_is_mul ? mul_result :
-                    exe_is_div ? div_result : exe_alu_result;
+// EXE 最终输出：ALU / 除 二选一（乘法结果走 mul_prod_mem 流水寄存器，不在此列）
+// 下游（MEM 锁存、前递源）统一看 exe_result
+assign exe_result = exe_is_div ? div_result : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
@@ -508,19 +517,29 @@ always @(posedge clk) begin
         mem_res_from_mem <= 1'b0;
         mem_gr_we        <= 1'b0;
         mem_dest         <= 5'h0;
+        mem_is_mul       <= 1'b0;
+        mem_is_mulh      <= 1'b0;
+        mul_prod_mem     <= 64'h0;
     end
     else if (exe_fire) begin
         mem_pc           <= exe_pc;
-        mem_alu_result   <= exe_result;   // 已是 ALU/乘/除 选完的最终结果
+        mem_alu_result   <= exe_result;   // 已是 ALU/除 选完的最终结果
         mem_res_from_mem <= exe_res_from_mem;
         mem_gr_we        <= exe_gr_we;
         mem_dest         <= exe_dest;
+        mem_is_mul       <= exe_is_mul;   // 乘积与指令同拍搭车进 MEM 级
+        mem_is_mulh      <= exe_is_mulh;
+        mul_prod_mem     <= mul_prod[63:0];
     end
 end
 
 // ================== 11. MEM 级组合逻辑 ==================
 
-assign mem_final_result = mem_res_from_mem ? data_sram_rdata : mem_alu_result;
+// 三选一位掩码 MUX：load 数据 / 乘积（高低位）/ ALU 结果，one-hot 互斥，同 rf_rdata_fwd 风格
+assign mem_final_result = ({32{mem_res_from_mem        }} & data_sram_rdata     )
+                        | ({32{mem_is_mul & mem_is_mulh}} & mul_prod_mem[63:32] )
+                        | ({32{mem_is_mul & ~mem_is_mulh}} & mul_prod_mem[31:0] )
+                        | ({32{~mem_res_from_mem & ~mem_is_mul}} & mem_alu_result);
 
 // ================== 12. MEM -> WB 级间寄存器 ==================
 

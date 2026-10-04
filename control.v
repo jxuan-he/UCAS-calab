@@ -12,6 +12,7 @@ module control(
     input  wire        exe_valid,
     input  wire        exe_gr_we,
     input  wire        exe_res_from_mem,   // EXE 是 load 时 ALU 结果是地址，不可前递
+    input  wire        exe_is_mul,         // EXE 是乘法时结果在 DSP 里流水，当拍不可前递
     input  wire [ 4:0] exe_dest,
 
     // 生产侧：MEM 级间寄存器
@@ -31,16 +32,17 @@ module control(
     wire mem_hit1 = mem_valid & mem_gr_we & (mem_dest != 5'd0) & (mem_dest == id_rf_raddr1);
     wire mem_hit2 = mem_valid & mem_gr_we & (mem_dest != 5'd0) & (mem_dest == id_rf_raddr2);
 
-    // 阻塞：唯一前递救不了的冲突是 load 的 d=1
-    // （load 数据要 MEM 拍末才从 BRAM 回来，消费者 EXE 拍头就要，物理上差一拍）
-    assign id_stall = id_valid & exe_res_from_mem & (exe_hit1 | exe_hit2);
+    // 阻塞：前递救不了的冲突是「结果迟到型」生产者的 d=1
+    // - load：数据要 MEM 拍末才从 BRAM 回来，消费者 EXE 拍头就要，物理上差一拍
+    // - mul ：乘积在 DSP 链里多打一拍（mul_prod_mem），EXE 当拍拿不出结果，同构处理
+    assign id_stall = id_valid & (exe_res_from_mem | exe_is_mul) & (exe_hit1 | exe_hit2);
 
     // 前递：就近优先（EXE 比 MEM 新，同地址双命中时必须取 EXE）
-    // EXE 是 load 时其 ALU 结果是访存地址而非数据，不可作为前递源；
-    // 此时 id_stall 拉高，消费者当拍不锁存，fwd_sel 为无关项
-    assign fwd1_sel = (exe_hit1 & ~exe_res_from_mem) ? 2'b01 :
-                       mem_hit1                      ? 2'b10 : 2'b00;
-    assign fwd2_sel = (exe_hit2 & ~exe_res_from_mem) ? 2'b01 :
-                       mem_hit2                      ? 2'b10 : 2'b00;
+    // EXE 是 load 时其 ALU 结果是访存地址而非数据、是 mul 时乘积还没出来，
+    // 两种都不可作为 EXE 前递源；此时 id_stall 拉高，消费者当拍不锁存，fwd_sel 为无关项
+    assign fwd1_sel = (exe_hit1 & ~exe_res_from_mem & ~exe_is_mul) ? 2'b01 :
+                       mem_hit1                                    ? 2'b10 : 2'b00;
+    assign fwd2_sel = (exe_hit2 & ~exe_res_from_mem & ~exe_is_mul) ? 2'b01 :
+                       mem_hit2                                    ? 2'b10 : 2'b00;
 
 endmodule
