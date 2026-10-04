@@ -62,6 +62,13 @@ wire        id_is_bne;
 wire        id_is_jirl;
 wire        id_is_bl;
 wire        id_is_b;
+wire        id_is_mul_w;
+wire        id_is_mulh_w;
+wire        id_is_mulh_wu;
+wire        id_is_div_w;
+wire        id_is_mod_w;
+wire        id_is_div_wu;
+wire        id_is_mod_wu;
 
 // 跳转（来自 EXE 级，由顶层转发）
 wire        exe_br_taken;
@@ -93,6 +100,13 @@ reg         exe_is_bne;
 reg         exe_is_jirl;
 reg         exe_is_bl;
 reg         exe_is_b;
+reg         exe_is_mul_w;
+reg         exe_is_mulh_w;
+reg         exe_is_mulh_wu;
+reg         exe_is_div_w;
+reg         exe_is_mod_w;
+reg         exe_is_div_wu;
+reg         exe_is_mod_wu;
 reg  [31:0] exe_rkd_value;
 
 // MEM 级间寄存器
@@ -124,6 +138,7 @@ wire        id_stall;
 wire [ 1:0] fwd1_sel;
 wire [ 1:0] fwd2_sel;
 wire [31:0] exe_alu_result;    // EXE 组合结果，前递源之一
+wire [31:0] exe_result;        // EXE 最终输出：ALU/乘/除 三选一
 wire [31:0] mem_final_result;  // MEM 组合结果，前递源之一
 
 wire [31:0] alu_src1;
@@ -260,7 +275,14 @@ IDU u_IDU (
     .is_bne       (id_is_bne),
     .is_jirl      (id_is_jirl),
     .is_bl        (id_is_bl),
-    .is_b         (id_is_b)
+    .is_b         (id_is_b),
+    .is_mul_w     (id_is_mul_w),
+    .is_mulh_w    (id_is_mulh_w),
+    .is_mulh_wu   (id_is_mulh_wu),
+    .is_div_w     (id_is_div_w),
+    .is_mod_w     (id_is_mod_w),
+    .is_div_wu    (id_is_div_wu),
+    .is_mod_wu    (id_is_mod_wu)
 );
 
 // ================== regfile ==================
@@ -276,10 +298,10 @@ regfile u_regfile (
     .wdata  (rf_wdata)
 );
 
-assign rf_rdata1_fwd = ({32{fwd1_sel == 2'b01}} & exe_alu_result  )
+assign rf_rdata1_fwd = ({32{fwd1_sel == 2'b01}} & exe_result      )
                      | ({32{fwd1_sel == 2'b10}} & mem_final_result)
                      | ({32{fwd1_sel == 2'b00}} & rf_rdata1       );
-assign rf_rdata2_fwd = ({32{fwd2_sel == 2'b01}} & exe_alu_result  )
+assign rf_rdata2_fwd = ({32{fwd2_sel == 2'b01}} & exe_result      )
                      | ({32{fwd2_sel == 2'b10}} & mem_final_result)
                      | ({32{fwd2_sel == 2'b00}} & rf_rdata2       );
 
@@ -336,6 +358,13 @@ always @(posedge clk) begin
         exe_is_jirl      <= 1'b0;
         exe_is_bl        <= 1'b0;
         exe_is_b         <= 1'b0;
+        exe_is_mul_w     <= 1'b0;
+        exe_is_mulh_w    <= 1'b0;
+        exe_is_mulh_wu   <= 1'b0;
+        exe_is_div_w     <= 1'b0;
+        exe_is_mod_w     <= 1'b0;
+        exe_is_div_wu    <= 1'b0;
+        exe_is_mod_wu    <= 1'b0;
         exe_rkd_value    <= 32'h0;
     end
     else if (id_fire) begin
@@ -353,6 +382,13 @@ always @(posedge clk) begin
         exe_is_jirl      <= id_is_jirl;
         exe_is_bl        <= id_is_bl;
         exe_is_b         <= id_is_b;
+        exe_is_mul_w     <= id_is_mul_w;
+        exe_is_mulh_w    <= id_is_mulh_w;
+        exe_is_mulh_wu   <= id_is_mulh_wu;
+        exe_is_div_w     <= id_is_div_w;
+        exe_is_mod_w     <= id_is_mod_w;
+        exe_is_div_wu    <= id_is_div_wu;
+        exe_is_mod_wu    <= id_is_mod_wu;
         exe_rkd_value    <= rf_rdata2_fwd;  // st_w 写数也吃前递
     end
 end
@@ -366,6 +402,74 @@ alu u_alu (
     .alu_src2   (exe_alu_src2),
     .alu_result (exe_alu_result)
 );
+
+// ================== 乘法器（exp10，行为级 *，综合进 DSP48，单周期） ==================
+// 33 位统一有符号乘法：有符号扩符号位、无符号乘补 0，66 位积弃高 2 位
+// mul.w 的低 32 位与有/无符号无关，故只有 mulh 两条需要区分
+wire        exe_is_mul  = exe_is_mul_w | exe_is_mulh_w | exe_is_mulh_wu;
+wire [32:0] mul_a       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src1[31], exe_alu_src1};
+wire [32:0] mul_b       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src2[31], exe_alu_src2};
+wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
+wire [31:0] mul_result  = (exe_is_mulh_w | exe_is_mulh_wu) ? mul_prod[63:32] : mul_prod[31:0];
+
+// ================== 除法器（exp10，Xilinx Divider Generator IP × 1） ==================
+// 只配一个无符号 IP：有符号除法先取绝对值送入，符号位启动拍锁存，出结果时恢复
+// （商符号 = 两操作数异或，余数符号跟随被除数——手册规定）
+// 反过来用有符号 IP 无法直接支持 div.wu/mod.wu（操作数 MSB 置位时会被误解为负数），
+// 而无符号 IP + 外层符号恢复可同时覆盖有/无符号四条指令，故选无符号。
+// 除数为 0 时手册规定"结果可以为任意值，但不触发例外"，故不做任何特判。
+// tvalid 握手成功后必须撤销，否则 IP 认为来了新任务；div_doing 保证一次只启动一单。
+// EXE 内指令是全流水最老的，不可能被冲刷，故除法器无需取消机制。
+wire        exe_is_div     = exe_is_div_w | exe_is_mod_w | exe_is_div_wu | exe_is_mod_wu;
+wire        exe_div_uns    = exe_is_div_wu | exe_is_mod_wu;
+reg         div_doing;
+reg         div_q_neg;     // 商应为负
+reg         div_r_neg;     // 余数应为负
+
+wire [31:0] div_a_abs = (~exe_div_uns & exe_alu_src1[31]) ? ~exe_alu_src1 + 32'd1 : exe_alu_src1;
+wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd1 : exe_alu_src2;
+
+// NonBlocking 模式下 IP 无 tready：tvalid 打一拍即被无条件接收，启动拍 = div_tvalid 本身
+wire        div_tvalid = exe_valid & exe_is_div & ~div_doing;
+wire        div_dout_tvalid;
+wire [63:0] div_dout_tdata;
+
+wire div_in_fire = div_tvalid;
+wire div_done    = div_dout_tvalid;
+
+always @(posedge clk) begin
+    if (!resetn)          div_doing <= 1'b0;
+    else if (div_in_fire) div_doing <= 1'b1;
+    else if (div_done)    div_doing <= 1'b0;
+end
+
+always @(posedge clk) begin
+    if (div_in_fire) begin
+        div_q_neg <= ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
+        div_r_neg <= ~exe_div_uns &  exe_alu_src1[31];
+    end
+end
+
+div_gen u_div (
+    .aclk                   (clk),
+    .s_axis_dividend_tvalid (div_tvalid),
+    .s_axis_dividend_tdata  (div_a_abs),
+    .s_axis_divisor_tvalid  (div_tvalid),
+    .s_axis_divisor_tdata   (div_b_abs),
+    .m_axis_dout_tvalid     (div_dout_tvalid),
+    .m_axis_dout_tdata      (div_dout_tdata)
+);
+
+// IP 输出布局：[63:32]=商，[31:0]=余数；按启动时锁存的符号恢复
+wire [31:0] quo_raw = div_dout_tdata[63:32];
+wire [31:0] rem_raw = div_dout_tdata[31:0];
+wire [31:0] quo     = div_q_neg ? ~quo_raw + 32'd1 : quo_raw;
+wire [31:0] rem     = div_r_neg ? ~rem_raw + 32'd1 : rem_raw;
+wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
+
+// EXE 最终输出：ALU / 乘 / 除 三选一。下游（MEM 锁存、前递源）统一看 exe_result
+assign exe_result = exe_is_mul ? mul_result :
+                    exe_is_div ? div_result : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
@@ -383,7 +487,8 @@ assign data_sram_wdata = exe_rkd_value;
 
 // ================== 10. EXE -> MEM 级间寄存器 ==================
 
-assign exe_ready_go = 1'b1;
+// 除法驻留等待：结果未出则 EXE 不放行，整条流水线自然停住
+assign exe_ready_go = ~exe_is_div | div_done;
 assign mem_allowin  = ~mem_valid || (mem_ready_go && wb_allowin);
 assign exe_fire     = exe_valid && exe_ready_go && mem_allowin;
 
@@ -406,7 +511,7 @@ always @(posedge clk) begin
     end
     else if (exe_fire) begin
         mem_pc           <= exe_pc;
-        mem_alu_result   <= exe_alu_result;
+        mem_alu_result   <= exe_result;   // 已是 ALU/乘/除 选完的最终结果
         mem_res_from_mem <= exe_res_from_mem;
         mem_gr_we        <= exe_gr_we;
         mem_dest         <= exe_dest;

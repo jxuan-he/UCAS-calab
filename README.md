@@ -1,23 +1,24 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
 基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现，对接龙芯实验环境（类 SRAM 接口）。
-当前状态：**exp7 / exp8 / exp9 全部完成**（六级流水 + 阻塞/冲刷/前递），**主频 100MHz**（xc7a200tfbg676-1）。
+当前状态：**exp7 / exp8 / exp9 / exp10 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法），**主频 100MHz**（xc7a200tfbg676-1）。
 
 > 注意：100MHz 布线后 WNS ≈ -0.08ns，仅 3 个端点轻微违例（最差是 PC→指令 BRAM 地址的
 > 纯布线延迟，以及 data RAM→前递→jirl 目标加法器路径），板上实测可运行；
 > 若要严格收敛，见第 6 节末尾。
 
-## 1. 已支持的指令（20 条）
+## 1. 已支持的指令（36 条）
 
-| 类别    | 指令                                                  |
-| ----- | --------------------------------------------------- |
-| 算术/逻辑 | `add.w` `sub.w` `slt` `sltu` `and` `or` `nor` `xor` |
-| 移位    | `slli.w` `srli.w` `srai.w`                          |
-| 立即数   | `addi.w` `lu12i.w`                                  |
-| 访存    | `ld.w` `st.w`                                       |
-| 跳转    | `b` `bl` `beq` `bne` `jirl`                         |
+| 类别    | 指令                                                                                |
+| ----- | --------------------------------------------------------------------------------- |
+| 算术/逻辑 | `add.w` `sub.w` `slt` `sltu` `and` `or` `nor` `xor`                              |
+| 移位    | `slli.w` `srli.w` `srai.w` `sll.w` `srl.w` `sra.w`                                |
+| 立即数   | `addi.w` `lu12i.w` `slti` `sltui` `andi` `ori` `xori` `pcaddu12i`                  |
+| 乘除法   | `mul.w` `mulh.w` `mulh.wu` `div.w` `mod.w` `div.wu` `mod.wu`                       |
+| 访存    | `ld.w` `st.w`                                                                     |
+| 跳转    | `b` `bl` `beq` `bne` `jirl`                                                       |
 
-尚未支持：乘除法、字节/半字访存、例外/中断/CSR、TLB（后续实验在此基础上扩展）。
+尚未支持：字节/半字访存、例外/中断/CSR、TLB（后续实验在此基础上扩展）。
 
 ## 2. 文件结构
 
@@ -28,8 +29,11 @@ IDU.v          ID 级：指令译码，生成 ALU 操作码/立即数/读写控�
 control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合）
 alu.v          EXE 级：12 种操作的组合逻辑 ALU
 regfile.v      32×32 寄存器堆，r0 恒 0，内部写读旁路
-decoder_*.v    实验模板译码器（当前未例化，IDU 用移位做 one-hot）
 ```
+
+EXE 级另有：乘法器（33 位统一有符号 `*`，综合进 DSP48，单周期出结果）、除法器
+（Xilinx Divider Generator IP `div_gen`，Radix2/无符号/NonBlocking，~37 拍驻留等待；
+有符号除法取绝对值送入、出结果按锁存符号恢复，余数符号跟随被除数）。
 
 ## 3. 流水线结构
 
@@ -58,7 +62,7 @@ IF1 发请求，IF2 收响应。数据 RAM 同理：EXE 拍发请求，MEM 拍�
 | 信号           | 含义                                           |
 | ------------ | -------------------------------------------- |
 | `x_valid`    | 本级寄存器里有没有有效指令                                |
-| `x_ready_go` | 本级组合逻辑本拍能否算完（目前只有 ID 会因冲突为 0）                |
+| `x_ready_go` | 本级组合逻辑本拍能否算完（ID 会因冲突为 0；EXE 在除法驻留期间为 0）          |
 | `x_allowin`  | 是否允许上一级打进来：`~x_valid                         |
 | `x_fire`     | 握手成功：`x_valid && x_ready_go && next_allowin` |
 
@@ -145,6 +149,9 @@ stall 时 PC 不更新，只是重复取同一条指令，IF2 槽位被占着，
    级间寄存器；
 4. 冲突检测一般**不用动**——`control.v` 只看地址不看指令。
 
+乘法/除法照此办理了「不改动 control.v」：乘法当拍出结果，前递天然覆盖；除法驻留期间
+消费者被 `exe_allowin=0` 挡住，完成拍走正常 EXE 前递通路。
+
 ### 改代码时的注意事项
 
 - 级间寄存器动 `valid` 逻辑时，先想清除和 `exe_br_taken` 冲刷的优先级关系。
@@ -171,4 +178,8 @@ c93e59e  分支冲刷：清各级 valid
 7b11fe5  wb_valid 统一进置出清模板
 6616327  exp8&9: support pipeline stall, flush and forwarding
 4c104e9  perf: 取指常开，主频 50MHz → 100MHz
+e1f3a3c  删除 exp6 遗留的模板译码器
+753020c  exp8&9: 堵住被 kill 的 IF2 槽位泄进 ID（exp8 纯阻塞首次暴露 pend 路径）
+87803fc  exp10: 9 条算逻指令（slti/sltui/andi/ori/xori/sll.w/srl.w/sra.w/pcaddu12i）
+（本提交）exp10: 7 条乘除指令（DSP48 单周期乘法 + div_gen IP 多周期除法驻留）
 ```

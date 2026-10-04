@@ -24,7 +24,16 @@ module IDU(
     output        is_bne,
     output        is_jirl,
     output        is_bl,
-    output        is_b
+    output        is_b,
+
+    // 乘除（exp10 B 类）
+    output        is_mul_w,
+    output        is_mulh_w,
+    output        is_mulh_wu,
+    output        is_div_w,
+    output        is_mod_w,
+    output        is_div_wu,
+    output        is_mod_wu
 );
 
     // ================== 1. 指令字段切分 ==================
@@ -48,7 +57,7 @@ module IDU(
     wire [ 3:0] op_21_20_d =  4'b1 << op_21_20;
     wire [31:0] op_19_15_d = 32'b1 << op_19_15;
 
-    // ================== 3. 指令识别（20 + exp10 A类9 = 29条） ==================
+    // ================== 3. 指令识别（20 + exp10 A类9 + B类7 = 36条） ==================
     wire inst_add_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h00];
     wire inst_sub_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h02];
     wire inst_slt    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h04];
@@ -81,6 +90,15 @@ module IDU(
     wire inst_srl_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
     wire inst_sra_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
     wire inst_pcaddu12i= op_31_26_d[6'h07];   // rd = pc + {si20,12'b0}
+
+    // exp10 B 类：乘除（编码已从 test.s 机器码验证；div/mod 组 op_21_20=0x2，与 mul 组不同）
+    wire inst_mul_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h18];
+    wire inst_mulh_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h19];
+    wire inst_mulh_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h1a];
+    wire inst_div_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h00];
+    wire inst_mod_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
+    wire inst_div_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
+    wire inst_mod_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 
     // ================== 4. ALU 控制信号 ==================
     assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | inst_bl
@@ -139,6 +157,8 @@ module IDU(
     wire need_rkd = inst_add_w | inst_sub_w | inst_slt  | inst_sltu |
                     inst_nor   | inst_and   | inst_or   | inst_xor  |
                     inst_sll_w | inst_srl_w | inst_sra_w |          // 寄存器移位真读 rk
+                    inst_mul_w | inst_mulh_w| inst_mulh_wu|          // 乘除全读 rj/rk
+                    inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |
                     inst_beq   | inst_bne   | inst_st_w;
 
     assign rf_raddr1 = {5{need_rj}} & rj;
@@ -154,5 +174,14 @@ module IDU(
     assign is_jirl = inst_jirl;
     assign is_bl   = inst_bl;
     assign is_b    = inst_b;
+
+    // ================== 11. 乘除类型输出 ==================
+    assign is_mul_w   = inst_mul_w;
+    assign is_mulh_w  = inst_mulh_w;
+    assign is_mulh_wu = inst_mulh_wu;
+    assign is_div_w   = inst_div_w;
+    assign is_mod_w   = inst_mod_w;
+    assign is_div_wu  = inst_div_wu;
+    assign is_mod_wu  = inst_mod_wu;
 
 endmodule
