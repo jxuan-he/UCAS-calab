@@ -1,0 +1,2 @@
+# IP 核产物（xci/dcp/vhd 等）不做文本换行转换
+ip/** -text

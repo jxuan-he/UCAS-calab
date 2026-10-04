@@ -29,10 +29,17 @@ IDU.v          ID 级：指令译码，生成 ALU 操作码/立即数/读写控�
 control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合）
 alu.v          EXE 级：12 种操作的组合逻辑 ALU
 regfile.v      32×32 寄存器堆，r0 恒 0，内部写读旁路
+ip/div_gen/    除法器 IP 产物（xci/dcp/仿真模型，免重建，见下）
 ```
 
-EXE 级另有：乘法器（33 位统一有符号 `*`，综合进 DSP48，单周期出结果）、除法器
-（Xilinx Divider Generator IP `div_gen`，Radix2/无符号/NonBlocking，~37 拍驻留等待；
+除法器依赖 Xilinx Divider Generator IP。为免每个新实验工程手工重建，IP 产物已入库
+（`ip/div_gen/`）：新实验解压环境后，把该目录拷到
+`soc_verify/soc_bram/rtl/xilinx_ip/div_gen/`，`create_project.tcl` 的
+`../rtl/xilinx_ip/*/*.xci` glob 会自动收编，综合用 dcp、仿真用 sim/div_gen.vhd，
+无需再开 IP Catalog。
+
+EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→MEM 沿打一拍）、
+除法器（Divider Generator IP `div_gen`，无符号/NonBlocking，~37 拍驻留；
 有符号除法取绝对值送入、出结果按锁存符号恢复，余数符号跟随被除数）。
 
 ## 3. 流水线结构
