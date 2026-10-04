@@ -43,7 +43,7 @@ ip/div_gen/    除法器 IP 产物（xci/dcp/仿真模型，免重建，见下�
 > RTL 例化和 glob 收编都会自动对上，无需改任何代码。
 
 EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→MEM 沿打一拍）、
-除法器（Divider Generator IP `div_gen`，无符号/NonBlocking，~37 拍驻留；
+除法器（Divider Generator IP `div_gen`，无符号/NonBlocking，34 拍驻留；
 有符号除法取绝对值送入、出结果按锁存符号恢复，余数符号跟随被除数）。
 
 ## 3. 流水线结构
