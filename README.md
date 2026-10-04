@@ -1,8 +1,10 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
 基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现，对接龙芯实验环境（类 SRAM 接口）。
-当前状态：**exp7 ~ exp11 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法 + 转移/子字访存），
-**主频 100MHz**（xc7a200tfbg676-1），布线后 WNS = +0.063ns，时序收敛。
+当前状态：**exp7 ~ exp11 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法 + 转移/子字访存）。
+**主频 100MHz**（xc7a200tfbg676-1，实验默认要求 50MHz，本设计 2× 收敛）：
+布线后 phys_opt 前 WNS = -0.249ns，`phys_opt_design` 后 **WNS = +0.071ns**（策略
+`Performance_ExplorePostRoutePhysOpt`，run 内自动完成）。
 
 ## 1. 已支持的指令（46 条）
 
@@ -148,8 +150,10 @@ stall 时 PC 不更新，只是重复取同一条指令，IF2 槽位被占着，
 2. **load 统一 WB 交付（exp11）**：子字访存加入后，MEM 级的字节/半字抽取逻辑压垮
    「BRAM 出数→抽取→前递→ID/EXE 锁存」链（WNS=-0.94ns）。修复分两步：抽取先挪 WB 级
    （-0.18ns），再撤掉 ld.w 的 MEM 前递、load 全走 WB 交付，BRAM 出数只接寄存器，
-   整类长链消除，WNS=+0.063ns 收敛。代价：load-use d=1 停 2 拍、d=2 停 1 拍，
-   func 实测仅多停 871 拍（0.58% 执行时间）。
+   整类长链消除。收敛依赖布线后物理优化：策略 `Performance_ExplorePostRoutePhysOpt`
+   （phys_opt 前 -0.249ns → 后 +0.071ns；违规端点 17 个、TNS -1.56ns，布线占 70~84%，
+   属实现噪声量级，phys_opt 一次清掉）。
+   代价：load-use d=1 停 2 拍、d=2 停 1 拍，func 实测仅多停 871 拍（0.58% 执行时间）。
 
 **教训/经验**：给 BRAM/存储器的使能信号尽量不要挂在一拍内跨多级的组合逻辑后面；
 "多发无害的请求 + 响应侧丢弃"往往比"精确控制请求"时序好得多；存储器输出当拍只锁存、
