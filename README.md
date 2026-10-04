@@ -1,13 +1,10 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
 基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现，对接龙芯实验环境（类 SRAM 接口）。
-当前状态：**exp7 / exp8 / exp9 / exp10 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法），**主频 100MHz**（xc7a200tfbg676-1）。
+当前状态：**exp7 ~ exp11 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法 + 转移/子字访存），
+**主频 100MHz**（xc7a200tfbg676-1），布线后 WNS = +0.063ns，时序收敛。
 
-> 注意：100MHz 布线后 WNS ≈ -0.08ns，仅 3 个端点轻微违例（最差是 PC→指令 BRAM 地址的
-> 纯布线延迟，以及 data RAM→前递→jirl 目标加法器路径），板上实测可运行；
-> 若要严格收敛，见第 6 节末尾。
-
-## 1. 已支持的指令（36 条）
+## 1. 已支持的指令（46 条）
 
 | 类别    | 指令                                                                                |
 | ----- | --------------------------------------------------------------------------------- |
@@ -15,10 +12,10 @@
 | 移位    | `slli.w` `srli.w` `srai.w` `sll.w` `srl.w` `sra.w`                                |
 | 立即数   | `addi.w` `lu12i.w` `slti` `sltui` `andi` `ori` `xori` `pcaddu12i`                  |
 | 乘除法   | `mul.w` `mulh.w` `mulh.wu` `div.w` `mod.w` `div.wu` `mod.wu`                       |
-| 访存    | `ld.w` `st.w`                                                                     |
-| 跳转    | `b` `bl` `beq` `bne` `jirl`                                                       |
+| 访存    | `ld.w` `st.w` `ld.b` `ld.h` `ld.bu` `ld.hu` `st.b` `st.h`                          |
+| 跳转    | `b` `bl` `beq` `bne` `blt` `bge` `bltu` `bgeu` `jirl`                            |
 
-尚未支持：字节/半字访存、例外/中断/CSR、TLB（后续实验在此基础上扩展）。
+尚未支持：例外/中断/CSR、TLB（后续实验在此基础上扩展）。
 
 ## 2. 文件结构
 
@@ -26,7 +23,7 @@
 mycpu_top.v    顶层：六级流水骨架，全部级间寄存器、握手、前递 MUX、访存接口
 IF_PC.v        IF1 级：PC 寄存器、取指请求、分支重定向（含 pend 挂起）
 IDU.v          ID 级：指令译码，生成 ALU 操作码/立即数/读写控制/分支目标
-control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合）
+control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合；MEM 级 load 不前递）
 alu.v          EXE 级：12 种操作的组合逻辑 ALU
 regfile.v      32×32 寄存器堆，r0 恒 0，内部写读旁路
 ip/div_gen/    除法器 IP 产物（xci/dcp/仿真模型，免重建，见下）
@@ -48,9 +45,9 @@ EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→M
         ┌────────────── 前端（取指）──────────────┐
  IF1          IF2           ID           EXE          MEM          WB
 ┌───────┐  ┌────────┐  ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌─────────┐
-│ PC 寄存 │  │ 收 BRAM │  │ 译码 IDU │  │ ALU 运算  │  │ 收 data  │  │ 写回     │
-│ 发取指  │→ │ 响应    │→ │ 读 regfile│→ │ 分支裁决  │→ │ RAM 响应 │→ │ regfile  │
-│ 请求    │  │ kill 处理│  │ 冲突检测 │  │ 发访存请求│  │          │  │ debug 输出│
+│ PC 寄存 │  │ 收 BRAM │  │ 译码 IDU │  │ ALU 运算  │→ │ 收 data  │→ │ 写回     │
+│ 发取指  │→ │ 响应    │→ │ 读 regfile│→ │ 分支裁决  │  │ RAM 响应 │  │ regfile  │
+│ 请求    │  │ kill 处理│  │ 冲突检测 │  │ 发访存请求│  │ （仅锁存） │  │ load 抽取 │
 └───────┘  └────────┘  └─────────┘  └──────────┘  └─────────┘  └─────────┘
      ▲                                   │
      └───────────────────────────────────┘
@@ -60,7 +57,8 @@ EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→M
 ```
 
 为什么取指拆成 IF1 + IF2 两级：指令 BRAM 是**同步读**——本拍发地址，下一拍数据才回来。
-IF1 发请求，IF2 收响应。数据 RAM 同理：EXE 拍发请求，MEM 拍收 `data_sram_rdata`。
+IF1 发请求，IF2 收响应。数据 RAM 同理：EXE 拍发请求，MEM 拍收 `data_sram_rdata`——但**只锁存不消费**，
+load 数据统一在 WB 拍交付（抽取/扩展也放 WB），原因见 5.2。
 
 ## 4. 握手协议（读懂代码的关键）
 
@@ -82,20 +80,28 @@ IF1 发请求，IF2 收响应。数据 RAM 同理：EXE 拍发请求，MEM 拍�
 
 - EXE→ID、MEM→ID 两级前递，在 `control.v` 里做纯组合的地址比较，`fwd1_sel/fwd2_sel`
   在 `mycpu_top.v` 选通： `00=regfile  01=EXE 结果  10=MEM 结果`（就近优先）。
-- `st.w` 的写数（`exe_rkd_value`）和 `jirl` 的目标计算（`rj_value`）也吃前递。
+- **MEM 级前递只服务 ALU/乘法结果；load 不走 MEM 前递**（见 5.2）。
+- `st.x` 的写数（`exe_rkd_value`）和 `jirl` 的目标计算（`rj_value`）也吃前递。
 - WB→ID 的同拍冲突由 `regfile.v` 内部的写读旁路解决，不占用前递通道。
 - IDU 把"假读"的寄存器地址钳到 r0（`need_rj/need_rkd` 掩码），r0 天然无相关，
   使 `control.v` 退化成纯等值比较，不用懂指令语义。
 
 ### 5.2 阻塞（stall）
 
-唯一前递救不了的情况：**load 后紧跟使用者**（load 数据 MEM 拍末才从 BRAM 回来，
-使用者在 EXE 拍头就要，物理上差一拍）。此时 `id_stall` 拉高：
-ID 停住 → 前端随之冻结 → EXE 进一个 bubble，一拍后从 MEM 前递解决。
+唯一前递救不了的情况：**load 后紧跟使用者**。本设计里 load 统一「WB 拍交付」：
+EXE 发地址 → MEM 拍 BRAM 出数**只锁存**进 `wb_sram_rdata`（不消费、不前递）→ WB 拍
+做字节/半字抽取+扩展、写 regfile。消费者 d=1 停 2 拍、d=2 停 1 拍，最后经 regfile
+写读旁路拿到 WB 拍抽好的值。
+
+为什么不让 ld.w 走 MEM 前递（能少停一拍）？因为「BRAM 出数当拍串前递+加法器+锁存」
+是天生最长的组合链（exp11 初版 WNS=-0.94ns 全毁在这条链上）；而且真实 cache 的
+出数延迟可变，MEM 前递依赖「恰好 1 拍出数」的假设，扩展性为零。用不到 1% 的 CPI
+（func 实测多停 871 拍/15 万拍）换时序收敛 + 架构统一 + cache 就绪。
 
 ### 5.3 冲刷（flush）
 
-分支在 **EXE 级裁决**（`beq/bne` 用 ALU 减法结果判零，`b/bl/jirl` 无条件跳）。
+分支在 **EXE 级裁决**（`beq/bne` 用 ALU 减法结果判零，`blt/bge/bltu/bgeu` 复用
+slt/sltu 比较结果最低位，`b/bl/jirl` 无条件跳）。
 `exe_br_taken` 有效时，分支后面的三条错误路径指令全部作废：
 
 - **IF1**：本拍在飞的取指请求地址是错误路径，由 `if1_kill` 标记，响应到达时 IF2 置 NOP；
@@ -128,20 +134,25 @@ id_inst 译码 → 读地址生成 → control 冲突检测 → id_stall
 stall 时 PC 不更新，只是重复取同一条指令，IF2 槽位被占着，响应直接丢弃即可。
 这一刀切断了整条组合链，实现后 cpu_clk 从 50MHz 提到 100MHz。
 
-100MHz 下仅剩的 3 个轻微违例端点（供后续收紧参考）：
+### exp10/11 的两轮时序修复
 
-1. `u_if_pc/pc_reg[2]/[11]` → 指令 BRAM `ADDRARDADDR`（0 级逻辑、~95% 纯布线）
-   —— PC 寄存器到 BRAM 地址口太远，可靠布局约束（pblock 拉近 CPU 与 inst_ram）解决；
-2. `data_ram` 读出 → MEM 前递 → IDU jirl 目标加法器 → `exe_br_target_reg[30]`
-   （14 级逻辑）—— jirl 目标计算在 ID 级，串了"BRAM 读出→前递 MUX→加法器"一整条链。
+1. **乘法流水化（exp10）**：单周期 33×33 乘法（DSP48 级联+CARRY4）WNS=-1.53ns，
+   乘积改到 EXE→MEM 沿锁存、高低位选择挪 MEM 级，mul 与 load 同构为「结果迟到型」。
+2. **load 统一 WB 交付（exp11）**：子字访存加入后，MEM 级的字节/半字抽取逻辑压垮
+   「BRAM 出数→抽取→前递→ID/EXE 锁存」链（WNS=-0.94ns）。修复分两步：抽取先挪 WB 级
+   （-0.18ns），再撤掉 ld.w 的 MEM 前递、load 全走 WB 交付，BRAM 出数只接寄存器，
+   整类长链消除，WNS=+0.063ns 收敛。代价：load-use d=1 停 2 拍、d=2 停 1 拍，
+   func 实测仅多停 871 拍（0.58% 执行时间）。
 
 **教训/经验**：给 BRAM/存储器的使能信号尽量不要挂在一拍内跨多级的组合逻辑后面；
-"多发无害的请求 + 响应侧丢弃"往往比"精确控制请求"时序好得多。
+"多发无害的请求 + 响应侧丢弃"往往比"精确控制请求"时序好得多；存储器输出当拍只锁存、
+不消费，是流水线 CPU 对接存储层次结构（cache/总线）的正确姿势。
 
 ## 7. 与 SoC 的接口约定
 
 - `inst_sram_*`：指令 BRAM，同步读，CPU 只读（`we` 恒 0）。
 - `data_sram_*`：数据 BRAM，同步读；EXE 拍发 `en/we/addr/wdata`，MEM 拍收 `rdata`。
+  写支持字节使能（`st.b` 单道 / `st.h` 双道移位生成）；读数据锁存进 WB 拍再抽取。
 - `debug_wb_*`：写回级追踪信号，实验环境用来和 golden trace 比对。
 - 复位：`resetn` 低有效，PC 复位到 `0x1c000000`。
 
@@ -168,9 +179,9 @@ stall 时 PC 不更新，只是重复取同一条指令，IF2 槽位被占着，
 
 ### 验证流程
 
-- 功能验证：`exp9/func` 下的测试程序（`make` 生成 inst_ram.coe），在
-  `exp9/soc_verify/soc_bram` 跑 Vivado 仿真，与 `gettrace/golden_trace.txt` 比对。
-- 上板/时序：`exp9/soc_verify/soc_bram/run_vivado` 工程实现后看
+- 功能验证：`exp11/func` 下的测试程序（`make` 生成 inst_ram.coe），在
+  `exp11/soc_verify/soc_bram` 跑 Vivado 仿真，与 `gettrace/golden_trace.txt` 比对。
+- 上板/时序：`exp11/soc_verify/soc_bram/run_vivado` 工程实现后看
   `soc_lite_top_timing_summary_routed.rpt` 的 WNS。
 
 ## 9. 提交历史（设计演进参考）
@@ -188,5 +199,8 @@ c93e59e  分支冲刷：清各级 valid
 e1f3a3c  删除 exp6 遗留的模板译码器
 753020c  exp8&9: 堵住被 kill 的 IF2 槽位泄进 ID（exp8 纯阻塞首次暴露 pend 路径）
 87803fc  exp10: 9 条算逻指令（slti/sltui/andi/ori/xori/sll.w/srl.w/sra.w/pcaddu12i）
-（本提交）exp10: 7 条乘除指令（DSP48 单周期乘法 + div_gen IP 多周期除法驻留）
+bc88ad3  exp10: 7 条乘除指令（DSP48 单周期乘法 + div_gen IP 多周期除法驻留）
+c7da39e  exp10: 乘积 EXE→MEM 沿锁存，100MHz WNS 收敛
+86a90af  exp11: 4 条转移指令（blt/bge/bltu/bgeu，复用 slt/sltu 比较）
+cbfe9bb  exp11: 6 条访存指令 + load 统一 WB 交付，WNS +0.063ns
 ```
