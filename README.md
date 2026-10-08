@@ -1,12 +1,11 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
 基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现，对接龙芯实验环境（类 SRAM 接口）。
-当前状态：**exp7 ~ exp11 全部完成**（六级流水 + 阻塞/冲刷/前递 + 乘除法 + 转移/子字访存）。
-**主频 100MHz**（xc7a200tfbg676-1，实验默认要求 50MHz，本设计 2× 收敛）：
-布线后 phys_opt 前 WNS = -0.249ns，`phys_opt_design` 后 **WNS = +0.071ns**（策略
-`Performance_ExplorePostRoutePhysOpt`，run 内自动完成）。
+当前支持 exp12 的 syscall 例外和 exp13 的通用例外、软件中断、定时器中断及稳定计数器。
+`environment/exp12` 与 `environment/exp13` 的 `myCPU` 目录均已放入对应 RTL。
+两套工程的 PLL 配置要求 `cpu_clk=100MHz`，时序结果以各自的布线报告为准。
 
-## 1. 已支持的指令（46 条）
+## 1. 已支持的指令
 
 | 类别    | 指令                                                                                |
 | ----- | --------------------------------------------------------------------------------- |
@@ -16,8 +15,18 @@
 | 乘除法   | `mul.w` `mulh.w` `mulh.wu` `div.w` `mod.w` `div.wu` `mod.wu`                       |
 | 访存    | `ld.w` `st.w` `ld.b` `ld.h` `ld.bu` `ld.hu` `st.b` `st.h`                          |
 | 跳转    | `b` `bl` `beq` `bne` `blt` `bge` `bltu` `bgeu` `jirl`                            |
+| 陷入/CSR | `syscall` `break` `ertn` `csrrd` `csrwr` `csrxchg` `rdcntvl.w` `rdcntvh.w` `rdcntid` |
 
-尚未支持：例外/中断/CSR、TLB（后续实验在此基础上扩展）。
+同步例外支持 `SYS`、`BRK`、`INE`、`IPE`、取指地址不对齐 `ADEF`、访存地址不对齐 `ALE`。
+例外信息随指令流到 WB 级统一提交，`ERA`、`ESTAT`、`PRMD` 等由 `CP0.v` 更新；
+`EENTRY` 必须由软件先配置到实际可取指的 4 KiB 对齐入口。当前仅支持直接地址模式和
+`ECFG.VS=0` 的统一入口。软件中断与定时器中断支持 `ECFG.LIE` 和 `CRMD.IE` 门控；
+外部硬件中断、TLB、分页及其相关例外尚未实现。
+
+`CP0.v` 内部统一采用 `cp0_<LoongArch CSR>_<字段>` 命名。教材中的 MIPS
+`Status/Cause/EPC/BadVAddr/Count/Compare` 在本设计中按功能分别对应
+`CRMD+PRMD+ECFG/ESTAT/ERA/BADV/稳定计数器/TCFG+TVAL+TICLR`；这些寄存器的格式和语义并不
+完全相同，因此 RTL 保留 LoongArch 架构名。
 
 ## 2. 文件结构
 
@@ -25,28 +34,41 @@
 mycpu_top.v    顶层：六级流水骨架，全部级间寄存器、握手、前递 MUX、访存接口
 IF_PC.v        IF1 级：PC 寄存器、取指请求、分支重定向（含 pend 挂起）
 IDU.v          ID 级：指令译码，生成 ALU 操作码/立即数/读写控制/分支目标
+CP0.v          实验 CP0 模块：LoongArch32 CSR、软件/定时器中断、稳定计数器
 control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合；MEM 级 load 不前递）
 alu.v          EXE 级：12 种操作的组合逻辑 ALU
 regfile.v      32×32 寄存器堆，r0 恒 0，内部写读旁路
-ip/div_gen/    除法器 IP 产物（xci/dcp/仿真模型，免重建，见下）
+div_gen.v      迭代无符号除法器，兼容 Vivado 2019.2
+tests/         同步例外与精确冲刷的 Icarus Verilog 集成仿真
 ```
 
-除法器依赖 Xilinx Divider Generator IP。为免每个新实验工程手工重建，IP 产物已入库
-（`ip/div_gen/`）：新实验解压环境后，把该目录拷到
-`soc_verify/soc_bram/rtl/xilinx_ip/div_gen/`，`create_project.tcl` 的
-`../rtl/xilinx_ip/*/*.xci` glob 会自动收编，综合用 dcp、仿真用 sim/div_gen.vhd，
-无需再开 IP Catalog。
-
-> **版本注意**：入库的 IP 产物由 **Vivado 2023.2** 生成（div_gen_v5_1_20），且绑定
-> 器件 xc7a200tfbg676。若你的 Vivado **版本低于 2023.2**（或换了器件），低版本可能读不了
-> 高版本产物，请按讲义用 IP Catalog 自行生成一个**无符号 32 位除法器**：
-> Radix2 / Unsigned / 32÷32 / 勾 Remainder / 不勾除 0 检测 / NonBlocking（无 tready）/
-> Automatic latency / 不勾 ACLKEN ARESETN；**模块名必须叫 `div_gen`**，放回原位置后
-> RTL 例化和 glob 收编都会自动对上，无需改任何代码。
+原仓库 `ip/div_gen/` 是 Vivado 2023.2 产物。exp12/exp13 改用同名的
+`div_gen.v` 迭代除法器，避免 Vivado 2019.2 的 IP 版本不兼容。
 
 EXE 级另有：乘法器（33 位统一有符号 `*` 进 DSP48，乘积 EXE→MEM 沿打一拍）、
-除法器（Divider Generator IP `div_gen`，无符号/NonBlocking，34 拍驻留；
+除法器（RTL `div_gen`，无符号、32 拍运算；
 有符号除法取绝对值送入、出结果按锁存符号恢复，余数符号跟随被除数）。
+
+## 2.1 本次工作整理（不含 `environment/`）
+
+本次改动围绕 exp12/exp13 的异常与中断处理、精确陷入、时序收敛和实验报告展开。这里按仓库根目录中的 RTL、仿真、图表和报告文件整理；实验工程目录不在本节逐项列举。
+
+| 文件或目录 | 本次变化与作用 |
+| --- | --- |
+| `mycpu_top.v` | 将异常信息随指令从 ID 级传到 WB 级，在 WB 精确提交陷入；保存异常 PC 与必要的坏地址，屏蔽异常指令的 GPR/CSR 写回，并冲刷流水线中的年轻指令。加入 CSR 指令、`ertn`、软件/定时器中断、稳定计数器及其流水级控制。 |
+| `CP0.v` | 新增 LoongArch CSR 状态模块，集中管理 `CRMD`、`PRMD`、`ECFG`、`ESTAT`、`ERA`、`BADV`、`EENTRY` 等寄存器，以及定时器和稳定计数器。 |
+| `IDU.v` | 扩展特权指令和计数器指令译码，识别 `syscall`、`break`、`ertn`、CSR 操作及非法指令；将 `rj` 读地址直接接到指令字段，读寄存器语义仍单独用于相关停顿判断。 |
+| `control.v` | 使用译码得到的 `rj` 使用标志控制相关停顿，同时保留寄存器地址比较和前递命中，避免无效指令译码链进入读地址/前递组合路径。 |
+| `IF_PC.v` | 接入陷入入口和 `ertn` 返回重定向，并处理重定向期间的取指响应丢弃。 |
+| `div_gen.v` | 新增纯 RTL 迭代无符号除法器，供较旧版本 Vivado 工程使用；有符号运算由 CPU 外层取绝对值并恢复符号。 |
+| `README.md` | 更新支持功能、模块分工、陷入/返回行为、时序优化背景和本次文件变化说明。 |
+
+### 本次实现的关键行为
+
+- 同步例外在流水线中携带原因码与指令 PC，到 WB 级统一更新 CSR 并重定向到 `EENTRY`；`ertn` 在 WB 恢复 `PRMD` 保存的处理前特权级/中断使能状态，并返回 `ERA`。
+- 通过较老指令优先提交和抑制年轻指令副作用实现精确陷入：异常或返回指令尚未提交时，年轻 store 不得发出写请求，年轻分支/除法操作也需被抑制。
+- `rj` 地址直连优化消除了指令识别、`need_rj` 掩码对寄存器堆读地址的组合影响；`rj` 是否参与当前指令仍用于判断是否需要因数据相关而停顿。
+- 时序记录聚焦 exp13：100 MHz 对应 10 ns 周期。优化前关键路径从 `id_inst_reg[27]/C` 到 `exe_br_target_reg[30]/D`，延迟 10.220 ns、WNS=-0.286 ns；`rj` 读地址直连后，这条译码/前递链被切断，优化后的关键路径转到 `exe_alu_src2_reg[4]/C` 至 Data RAM `ENARDEN`，延迟 9.687 ns、WNS=+0.002 ns。报告也记录了这轮调整的原因和路径变化。
 
 ## 3. 流水线结构
 
@@ -92,8 +114,9 @@ load 数据统一在 WB 拍交付（抽取/扩展也放 WB），原因见 5.2。
 - **MEM 级前递只服务 ALU/乘法结果；load 不走 MEM 前递**（见 5.2）。
 - `st.x` 的写数（`exe_rkd_value`）和 `jirl` 的目标计算（`rj_value`）也吃前递。
 - WB→ID 的同拍冲突由 `regfile.v` 内部的写读旁路解决，不占用前递通道。
-- IDU 把"假读"的寄存器地址钳到 r0（`need_rj/need_rkd` 掩码），r0 天然无相关，
-  使 `control.v` 退化成纯等值比较，不用懂指令语义。
+- `rj` 读地址直接取指令字段，避免 `known_inst → need_rj → 地址掩码` 进入读地址和前递组合链；
+  `rj_used` 仍用于控制无关数据冲突造成的停顿。`rkd` 地址仍按指令语义屏蔽无效读，
+  `control.v` 的前递命中继续按寄存器地址比较。
 
 ### 5.2 阻塞（stall）
 
@@ -183,17 +206,12 @@ stall 时 PC 不更新，只是重复取同一条指令，IF2 槽位被占着，
 
 ### 改代码时的注意事项
 
-- 级间寄存器动 `valid` 逻辑时，先想清除和 `exe_br_taken` 冲刷的优先级关系。
+- 级间寄存器动 `valid` 逻辑时，先想清楚 WB 陷入/`ertn` 与 EXE 分支的冲刷优先级。
 - 任何"本拍发、下拍收"的存储器请求，撤回是不可能的——用 kill/丢弃思路解决，
   不要试图在请求侧做精确控制（见第 6 节）。
-- 时钟约束在 SoC 侧（exp9/soc_verify 工程的 xdc），改主频去那里，CPU 内部无时钟假设。
+- 时钟约束在 SoC 侧。exp12/exp13 工程将 PLL 的 `cpu_clk` 配成 100 MHz。
 
-### 验证流程
 
-- 功能验证：`exp11/func` 下的测试程序（`make` 生成 inst_ram.coe），在
-  `exp11/soc_verify/soc_bram` 跑 Vivado 仿真，与 `gettrace/golden_trace.txt` 比对。
-- 上板/时序：`exp11/soc_verify/soc_bram/run_vivado` 工程实现后看
-  `soc_lite_top_timing_summary_routed.rpt` 的 WNS。
 
 ## 9. 提交历史（设计演进参考）
 

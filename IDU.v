@@ -7,6 +7,7 @@ module IDU(
     // 给顶层regfile
     output [ 4:0] rf_raddr1,
     output [ 4:0] rf_raddr2,
+    output        rj_used,
 
     // 给EXE级的控制信号
     output [11:0] alu_op,
@@ -40,7 +41,19 @@ module IDU(
     output        is_div_w,
     output        is_mod_w,
     output        is_div_wu,
-    output        is_mod_wu
+    output        is_mod_wu,
+
+    // Exception and privileged instructions
+    output        is_syscall,
+    output        is_break,
+    output        is_ine,
+    output        is_ertn,
+    output        is_csrrd,
+    output        is_csrwr,
+    output        is_csrxchg,
+    output [13:0] csr_num,
+    output        is_rdcnt,
+    output [ 1:0] rdcnt_kind
 );
 
     // ================== 1. 指令字段切分 ==================
@@ -124,6 +137,41 @@ module IDU(
     wire is_ld = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
     wire is_st = inst_st_w | inst_st_b | inst_st_h;
 
+    // Privileged encodings: csr_num occupies bits [23:10].
+    wire inst_syscall = (inst[31:15] == 17'h0056); // 0x002b0000 / 0xffff8000
+    wire inst_break   = (inst[31:15] == 17'h0054); // 0x002a0000 / 0xffff8000
+    wire inst_ertn    = (inst == 32'h0648_3800);
+    wire inst_csr     = (inst[31:24] == 8'h04);
+    wire inst_csrrd   = inst_csr & (rj == 5'd0);
+    wire inst_csrwr   = inst_csr & (rj == 5'd1);
+    wire inst_csrxchg = inst_csr & (rj != 5'd0) & (rj != 5'd1);
+    wire inst_rdcnt_low = (inst[31:10] == 22'h18);
+    wire inst_rdcnt_high = (inst[31:10] == 22'h19) && (rj == 5'd0);
+    wire inst_rdcntid = inst_rdcnt_low && (rd == 5'd0) && (rj != 5'd0);
+    wire known_inst = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
+                      inst_nor | inst_and | inst_or | inst_xor |
+                      inst_slli_w | inst_srli_w | inst_srai_w |
+                      inst_addi_w | is_ld | is_st | inst_jirl |
+                      inst_b | inst_bl | inst_beq | inst_bne | inst_lu12i_w |
+                      inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
+                      inst_sll_w | inst_srl_w | inst_sra_w | inst_pcaddu12i |
+                      inst_mul_w | inst_mulh_w | inst_mulh_wu |
+                      inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |
+                      inst_blt | inst_bge | inst_bltu | inst_bgeu |
+                      inst_syscall | inst_break | inst_ertn | inst_csr |
+                      inst_rdcnt_low | inst_rdcnt_high;
+
+    assign is_syscall = inst_syscall;
+    assign is_break   = inst_break;
+    assign is_ine     = ~known_inst;
+    assign is_ertn    = inst_ertn;
+    assign is_csrrd   = inst_csrrd;
+    assign is_csrwr   = inst_csrwr;
+    assign is_csrxchg = inst_csrxchg;
+    assign csr_num    = inst[23:10];
+    assign is_rdcnt   = inst_rdcnt_low | inst_rdcnt_high;
+    assign rdcnt_kind = inst_rdcntid ? 2'd2 : inst_rdcnt_high ? 2'd1 : 2'd0;
+
     // ================== 4. ALU 控制信号 ==================
     assign alu_op[ 0] = inst_add_w | inst_addi_w | is_ld | is_st | inst_jirl | inst_bl
                       | inst_pcaddu12i;
@@ -161,7 +209,7 @@ module IDU(
     wire [31:0] jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
     // ================== 6. 操作数选择控制 ==================
-    wire src_reg_is_rd = inst_beq | inst_bne | is_st |
+    wire src_reg_is_rd = inst_beq | inst_bne | is_st | inst_csrwr | inst_csrxchg |
                          inst_blt | inst_bge | inst_bltu | inst_bgeu;
 
     assign src1_is_pc  = inst_jirl | inst_bl | inst_pcaddu12i;
@@ -173,10 +221,11 @@ module IDU(
 
     // ================== 7. 访存/写回控制 ==================
     assign res_from_mem = is_ld;
-    assign gr_we        = ~is_st & ~inst_beq & ~inst_bne & ~inst_b &
-                          ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;  // bl要写r1
+    assign gr_we        = known_inst & ~is_st & ~inst_beq & ~inst_bne & ~inst_b &
+                          ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu &
+                          ~inst_syscall & ~inst_break & ~inst_ertn; // CSR returns old value
     assign mem_we       = is_st;
-    assign dest         = inst_bl ? 5'd1 : rd;
+    assign dest         = inst_bl ? 5'd1 : inst_rdcntid ? rj : rd;
 
     // mem_size 按位生成本身就是 one-hot：bit0=字节，bit1=半字，全 0=字
     assign mem_size[0] = inst_ld_b | inst_ld_bu | inst_st_b;
@@ -184,9 +233,11 @@ module IDU(
     assign ld_uns   = inst_ld_bu | inst_ld_hu;
 
     // ================== 8. 寄存器读地址 ==================
-    // 真实读使能：不读寄存器的指令把读地址用位掩码钳到 r0，r0 天然无相关，
-    // 使下游冲突检测退化为纯等值比较（配合 dest != 0 排除）
-    wire need_rj  = ~inst_b & ~inst_bl & ~inst_lu12i_w & ~inst_pcaddu12i;
+    // rj 读地址直接取指令字段；真实读使能仅用于停顿判断，
+    // 避免指令译码进入寄存器堆读地址和前递选择的组合路径。
+    wire need_rj  = known_inst & ~inst_b & ~inst_bl & ~inst_lu12i_w &
+                    ~inst_pcaddu12i & ~inst_syscall & ~inst_break &
+                    ~inst_ertn & ~inst_csrrd & ~inst_csrwr & ~is_rdcnt;
     wire need_rkd = inst_add_w | inst_sub_w | inst_slt  | inst_sltu |
                     inst_nor   | inst_and   | inst_or   | inst_xor  |
                     inst_sll_w | inst_srl_w | inst_sra_w |          // 寄存器移位真读 rk
@@ -194,10 +245,11 @@ module IDU(
                     inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |
                     inst_beq   | inst_bne   |
                     inst_blt   | inst_bge   | inst_bltu   | inst_bgeu  |  // 条件转移读 rd 域
-                    is_st;
+                    is_st | inst_csrwr | inst_csrxchg;
 
-    assign rf_raddr1 = {5{need_rj}} & rj;
+    assign rf_raddr1 = rj;
     assign rf_raddr2 = {5{need_rkd}} & (src_reg_is_rd ? rd : rk);
+    assign rj_used = need_rj;
 
     // ================== 9. 跳转目标地址（ID级计算） ==================
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||

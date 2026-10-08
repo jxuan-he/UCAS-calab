@@ -12,6 +12,10 @@ module IF_PC(
     input         br_taken,
     input  [31:0] br_target,
 
+    // WB exception/ERTN has priority over a younger EXE branch.
+    input         trap_redirect,
+    input  [31:0] trap_target,
+
     // 指令 BRAM 接口
     output        inst_sram_en,     // 高有效：IF2 能收且非复位时才读
     output [31:0] inst_sram_addr,   // 当前 PC
@@ -32,13 +36,15 @@ module IF_PC(
     reg        pend_valid;
     reg [31:0] pend_target;
 
-    wire br_miss_fire = br_taken & ~if1_fire;   // 想跳但跳不成
+    wire br_miss_fire = br_taken & ~if1_fire & ~trap_redirect;
 
     always @(posedge clk) begin
         if (!resetn) begin
             pend_valid  <= 1'b0;
             pend_target <= 32'h0;
         end
+        else if (trap_redirect)
+            pend_valid <= 1'b0;
         else if (br_miss_fire) begin
             pend_valid  <= 1'b1;
             pend_target <= br_target;
@@ -49,14 +55,14 @@ module IF_PC(
 
     reg  [31:0] pc;
 
-    wire [31:0] next_pc = {32{ pend_valid             }} & pend_target
-                        | {32{~pend_valid &  br_taken }} & br_target
-                        | {32{~pend_valid & ~br_taken }} & (pc + 32'h4);
+    wire [31:0] next_pc = trap_redirect ? trap_target :
+                          pend_valid    ? pend_target :
+                          br_taken      ? br_target : (pc + 32'h4);
 
     always @(posedge clk) begin
         if (!resetn)
             pc <= 32'h1c000000;         // 同步复位到程序入口
-        else if (pend_valid | if1_fire)
+        else if (trap_redirect | pend_valid | if1_fire)
             pc <= next_pc;
     end
 
@@ -69,6 +75,6 @@ module IF_PC(
     // 将来换真实内存亦然），错误路径的响应由 if1_kill 标记、IF2 丢弃
     // assign inst_sram_en   = if2_allowin & resetn;
     assign inst_sram_en   = resetn;
-    assign if1_kill       = pend_valid | br_taken;
+    assign if1_kill       = pend_valid | br_taken | trap_redirect;
 
 endmodule

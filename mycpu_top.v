@@ -48,6 +48,7 @@ reg  [31:0] id_inst;
 // ID 输出
 wire [ 4:0] id_rf_raddr1;
 wire [ 4:0] id_rf_raddr2;
+wire        id_rj_used;
 wire [11:0] id_alu_op;
 wire        id_src1_is_pc;
 wire        id_src2_is_imm;
@@ -75,6 +76,31 @@ wire        id_is_div_w;
 wire        id_is_mod_w;
 wire        id_is_div_wu;
 wire        id_is_mod_wu;
+wire        id_is_syscall;
+wire        id_is_break;
+wire        id_is_ine;
+wire        id_is_ertn;
+wire        id_is_csrrd;
+wire        id_is_csrwr;
+wire        id_is_csrxchg;
+wire [13:0] id_csr_num;
+wire [ 1:0] cp0_plv;
+wire        cp0_has_interrupt;
+wire [31:0] exe_alu_result;
+wire        id_is_rdcnt;
+wire [ 1:0] id_rdcnt_kind;
+wire        id_is_csr = id_is_csrrd | id_is_csrwr | id_is_csrxchg;
+wire        id_is_priv = id_is_csr | id_is_ertn;
+wire        id_fetch_ade = |id_pc[1:0];
+wire        id_ipe = id_is_priv && (cp0_plv != 2'b00);
+wire        id_int = cp0_has_interrupt;
+wire        id_exc = id_int | id_fetch_ade | id_ipe | id_is_syscall |
+                     id_is_break | id_is_ine;
+wire [5:0] id_ecode = id_int       ? 6'h00 :
+                      id_fetch_ade ? 6'h08 :
+                      id_ipe       ? 6'h0e :
+                      id_is_syscall? 6'h0b :
+                      id_is_break  ? 6'h0c : 6'h0d;
 
 // 跳转（来自 EXE 级，由顶层转发）
 wire        exe_br_taken;
@@ -120,6 +146,22 @@ reg         exe_is_mod_w;
 reg         exe_is_div_wu;
 reg         exe_is_mod_wu;
 reg  [31:0] exe_rkd_value;
+reg  [31:0] exe_rj_value;
+reg  [31:0] exe_inst;
+reg         exe_is_rdcnt;
+reg  [31:0] exe_rdcnt_value;
+reg         exe_exc;
+reg  [ 5:0] exe_ecode;
+reg         exe_ertn;
+reg         exe_is_csr;
+reg         exe_csr_write;
+reg         exe_csr_xchg;
+reg  [13:0] exe_csr_num;
+wire        exe_mem_ale = exe_valid && (exe_mem_we || exe_res_from_mem) &&
+                          ((exe_mem_size[1] && exe_alu_result[0]) ||
+                           ((exe_mem_size == 2'b00) && (|exe_alu_result[1:0])));
+wire        exe_final_exc = exe_exc | exe_mem_ale;
+wire [ 5:0] exe_final_ecode = exe_exc ? exe_ecode : 6'h09;
 
 // MEM 级间寄存器
 reg         mem_valid;
@@ -133,6 +175,18 @@ reg         mem_is_mul;      // MEM 级是乘法
 reg         mem_is_mulh;     // MEM 级是取高位的乘法
 reg  [63:0] mul_prod_mem;    // 乘积流水寄存器，与指令同拍进 MEM 级
 reg  [ 4:0] mem_dest;
+reg  [31:0] mem_inst;
+reg         mem_exc;
+reg  [ 5:0] mem_ecode;
+reg         mem_badv_we;
+reg  [31:0] mem_badv;
+reg         mem_ertn;
+reg         mem_is_csr;
+reg         mem_csr_write;
+reg         mem_csr_xchg;
+reg  [13:0] mem_csr_num;
+reg  [31:0] mem_csr_wdata;
+reg  [31:0] mem_csr_wmask;
 
 // WB 级间寄存器
 reg         wb_valid;
@@ -145,6 +199,32 @@ reg  [ 1:0] wb_addr_low;     // load 地址低位
 reg  [ 1:0] wb_mem_size;
 reg         wb_ld_uns;
 reg         wb_res_from_mem;
+reg  [31:0] wb_inst;
+reg         wb_exc;
+reg  [ 5:0] wb_ecode;
+reg         wb_badv_we;
+reg  [31:0] wb_badv;
+reg         wb_ertn;
+reg         wb_is_csr;
+reg         wb_csr_write;
+reg         wb_csr_xchg;
+reg  [13:0] wb_csr_num;
+reg  [31:0] wb_csr_wdata;
+reg  [31:0] wb_csr_wmask;
+
+wire [31:0] csr_rdata;
+wire [31:0] cp0_eentry;
+wire [31:0] cp0_era;
+wire [31:0] cp0_tid;
+wire [63:0] cp0_stable_counter;
+wire        wb_trap = wb_valid && wb_exc;
+wire        wb_return = wb_valid && wb_ertn && !wb_exc;
+wire        wb_redirect = wb_trap | wb_return;
+wire        older_redirect_pending = (mem_valid && (mem_exc || mem_ertn)) ||
+                                     (wb_valid && (wb_exc || wb_ertn));
+wire        csr_inflight = (exe_valid && exe_is_csr) ||
+                           (mem_valid && mem_is_csr) ||
+                           (wb_valid && wb_is_csr);
 
 // regfile 端口
 wire [31:0] rf_rdata1;
@@ -159,7 +239,6 @@ wire [31:0] rf_rdata2_fwd;
 wire        id_stall;
 wire [ 1:0] fwd1_sel;
 wire [ 1:0] fwd2_sel;
-wire [31:0] exe_alu_result;    // EXE 组合结果，前递源之一
 wire [31:0] exe_result;        // EXE 最终输出：ALU/除 二选一（乘法走 mul_prod_mem）
 wire        exe_is_mul;    // 乘法（结果迟到型，见 control.v）
 wire [31:0] mem_final_result;  // MEM 组合结果，前递源之一
@@ -177,6 +256,8 @@ IF_PC u_if_pc(
     .if1_fire       (if1_fire),
     .br_taken       (exe_br_taken),
     .br_target      (exe_br_target),
+    .trap_redirect  (wb_redirect),
+    .trap_target    (wb_trap ? cp0_eentry : cp0_era),
     .inst_sram_en   (inst_sram_en),
     .inst_sram_addr (inst_sram_addr),
     .if1_kill       (if1_kill),
@@ -195,7 +276,8 @@ assign if2_inst_out = if1_fire_r ? inst_sram_rdata : if2_inst;
 // 被 kill 标记占位的槽位（错误路径响应当拍到达）视为空槽，允许接收新请求
 assign if2_allowin = ~if2_valid || if2_fire || if1_kill_r;
 assign if1_fire    = inst_sram_en && if2_allowin;
-assign id_ready_go = ~id_stall;
+// CSR instructions are rare; serialize them through WB to avoid CSR hazards.
+assign id_ready_go = ~id_stall && ~csr_inflight;
 assign id_allowin  = ~id_valid || (id_ready_go && exe_allowin);
 // kill 标记的槽位是错误路径响应：允许被新请求覆盖（见 if2_allowin），但绝不允许流向 ID
 // （exp8 纯阻塞下 bl/jirl 在 EXE 与 ID 阻塞同拍会触发 pend，kill 槽位到达时 ID 已空，不加门控会漏进 ID）
@@ -204,7 +286,7 @@ assign if2_fire    = if2_valid && id_allowin && ~if1_kill_r;
 always @(posedge clk) begin
     if (!resetn)
         if2_valid <= 1'b0;
-    else if (exe_br_taken)   // 分支冲刷：压过 if1_fire，清掉已在 IF2 的错误指令
+    else if (wb_redirect || exe_br_taken)
         if2_valid <= 1'b0;
     else if (if1_fire)
         if2_valid <= 1'b1;
@@ -257,7 +339,7 @@ end
 always @(posedge clk) begin
     if (!resetn)
         id_valid <= 1'b0;
-    else if (exe_br_taken)
+    else if (wb_redirect || exe_br_taken)
         id_valid <= 1'b0;
     else if (if2_fire)
         id_valid <= 1'b1;
@@ -285,6 +367,7 @@ IDU u_IDU (
     .rj_value     (rf_rdata1_fwd),   // jirl 目标计算也吃前递
     .rf_raddr1    (id_rf_raddr1),
     .rf_raddr2    (id_rf_raddr2),
+    .rj_used      (id_rj_used),
     .alu_op       (id_alu_op),
     .src1_is_pc   (id_src1_is_pc),
     .src2_is_imm  (id_src2_is_imm),
@@ -311,7 +394,41 @@ IDU u_IDU (
     .is_div_w     (id_is_div_w),
     .is_mod_w     (id_is_mod_w),
     .is_div_wu    (id_is_div_wu),
-    .is_mod_wu    (id_is_mod_wu)
+    .is_mod_wu    (id_is_mod_wu),
+    .is_syscall   (id_is_syscall),
+    .is_break     (id_is_break),
+    .is_ine       (id_is_ine),
+    .is_ertn      (id_is_ertn),
+    .is_csrrd     (id_is_csrrd),
+    .is_csrwr     (id_is_csrwr),
+    .is_csrxchg   (id_is_csrxchg),
+    .csr_num      (id_csr_num),
+    .is_rdcnt     (id_is_rdcnt),
+    .rdcnt_kind   (id_rdcnt_kind)
+);
+
+CP0 u_cp0 (
+    .clk           (clk),
+    .resetn        (resetn),
+    .trap          (wb_trap),
+    .trap_ecode    (wb_ecode),
+    .trap_esubcode (9'b0),
+    .trap_pc       (wb_pc),
+    .trap_badv_we  (wb_badv_we),
+    .trap_badv     (wb_badv),
+    .trap_inst     (wb_inst),
+    .ertn          (wb_return),
+    .csr_we        (wb_valid && wb_csr_write && !wb_exc),
+    .csr_num       (wb_csr_num),
+    .csr_wdata     (wb_csr_wdata),
+    .csr_wmask     (wb_csr_xchg ? wb_csr_wmask : 32'hffff_ffff),
+    .csr_rdata     (csr_rdata),
+    .cp0_eentry         (cp0_eentry),
+    .cp0_era            (cp0_era),
+    .cp0_plv            (cp0_plv),
+    .cp0_has_interrupt  (cp0_has_interrupt),
+    .cp0_tid            (cp0_tid),
+    .cp0_stable_counter (cp0_stable_counter)
 );
 
 // ================== regfile ==================
@@ -343,6 +460,7 @@ control u_control(
     .id_valid         (id_valid),
     .id_rf_raddr1     (id_rf_raddr1),
     .id_rf_raddr2     (id_rf_raddr2),
+    .id_rj_used       (id_rj_used),
     .exe_valid        (exe_valid),
     .exe_gr_we        (exe_gr_we),
     .exe_res_from_mem (exe_res_from_mem),
@@ -365,7 +483,7 @@ assign id_fire     = id_valid && id_ready_go && exe_allowin;
 always @(posedge clk) begin
     if (!resetn)
         exe_valid <= 1'b0;
-    else if (exe_br_taken)   // 分支冲刷：压过 id_fire，挡住当拍正试图进入EXE的错误指令
+    else if (wb_redirect || exe_br_taken)
         exe_valid <= 1'b0;
     else if (id_fire)
         exe_valid <= 1'b1;
@@ -403,6 +521,17 @@ always @(posedge clk) begin
         exe_is_div_wu    <= 1'b0;
         exe_is_mod_wu    <= 1'b0;
         exe_rkd_value    <= 32'h0;
+        exe_rj_value     <= 32'h0;
+        exe_inst         <= 32'h0340_0000;
+        exe_is_rdcnt     <= 1'b0;
+        exe_rdcnt_value  <= 32'b0;
+        exe_exc          <= 1'b0;
+        exe_ecode        <= 6'b0;
+        exe_ertn         <= 1'b0;
+        exe_is_csr       <= 1'b0;
+        exe_csr_write    <= 1'b0;
+        exe_csr_xchg     <= 1'b0;
+        exe_csr_num      <= 14'b0;
     end
     else if (id_fire) begin
         exe_pc           <= id_pc;
@@ -433,6 +562,19 @@ always @(posedge clk) begin
         exe_is_div_wu    <= id_is_div_wu;
         exe_is_mod_wu    <= id_is_mod_wu;
         exe_rkd_value    <= rf_rdata2_fwd;  // st_w 写数也吃前递
+        exe_rj_value     <= rf_rdata1_fwd;
+        exe_inst         <= id_inst;
+        exe_is_rdcnt     <= id_is_rdcnt;
+        exe_rdcnt_value  <= id_rdcnt_kind == 2'd2 ? cp0_tid :
+                            id_rdcnt_kind == 2'd1 ? cp0_stable_counter[63:32] :
+                                                     cp0_stable_counter[31:0];
+        exe_exc          <= id_exc;
+        exe_ecode        <= id_ecode;
+        exe_ertn         <= id_is_ertn;
+        exe_is_csr       <= id_is_csr;
+        exe_csr_write    <= id_is_csrwr | id_is_csrxchg;
+        exe_csr_xchg     <= id_is_csrxchg;
+        exe_csr_num      <= id_csr_num;
     end
 end
 
@@ -469,7 +611,8 @@ wire        div_q_neg = ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
 wire        div_r_neg = ~exe_div_uns &  exe_alu_src1[31];
 
 // NonBlocking 模式无 tready：tvalid 打一拍即被接收；div_doing 保证一次只启动一单
-wire        div_tvalid = exe_valid & exe_is_div & ~div_doing;
+wire        div_tvalid = exe_valid & exe_is_div & ~div_doing &
+                         ~older_redirect_pending;
 wire        div_dout_tvalid;
 wire [63:0] div_dout_tdata;
 
@@ -500,14 +643,16 @@ wire [31:0] rem     = div_r_neg ? ~rem_raw + 32'd1 : rem_raw;
 wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 
 // EXE 最终输出（ALU/除；乘法走 mul_prod_mem），下游 MEM 锁存与前递统一看 exe_result
-assign exe_result = exe_is_div ? div_result : exe_alu_result;
+assign exe_result = exe_is_rdcnt ? exe_rdcnt_value :
+                    exe_is_div ? div_result : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0；blt/bge/bltu/bgeu 复用 slt/sltu 结果最低位
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
 // 位掩码：各分支类型 one-hot 互斥，条件位收集后归约或
 assign exe_rj_eq_rkd = (exe_alu_result == 32'b0);
 wire   exe_rj_lt_rkd = exe_alu_result[0];
-assign exe_br_taken = exe_valid & (exe_is_beq  &  exe_rj_eq_rkd
+assign exe_br_taken = exe_valid & ~exe_final_exc & ~older_redirect_pending &
+                             (exe_is_beq  &  exe_rj_eq_rkd
                                  | exe_is_bne  & ~exe_rj_eq_rkd
                                  | exe_is_blt  &  exe_rj_lt_rkd
                                  | exe_is_bge  & ~exe_rj_lt_rkd
@@ -517,10 +662,11 @@ assign exe_br_taken = exe_valid & (exe_is_beq  &  exe_rj_eq_rkd
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
 // 位掩码三选一：字节道移位（st.b 单道 / st.h 半字对齐双道 / st.w 全道），写数据车道复制免对位
-assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we);
-assign data_sram_we    = ({4{exe_mem_we & exe_mem_size[0]}} & (4'b0001 <<  exe_alu_result[1:0]     ))
-                       | ({4{exe_mem_we & exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1], 1'b0}))
-                       | ({4{exe_mem_we & ~|exe_mem_size  }} &  4'hf                                  );
+assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we) &&
+                         ~exe_final_exc && ~older_redirect_pending;
+assign data_sram_we    = ({4{data_sram_en & exe_mem_we & exe_mem_size[0]}} & (4'b0001 <<  exe_alu_result[1:0]     ))
+                       | ({4{data_sram_en & exe_mem_we & exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1], 1'b0}))
+                       | ({4{data_sram_en & exe_mem_we & ~|exe_mem_size  }} &  4'hf                                  );
 assign data_sram_addr  = exe_alu_result;
 assign data_sram_wdata = ({32{exe_mem_size[0]}} & {4{exe_rkd_value[ 7:0]}})
                        | ({32{exe_mem_size[1]}} & {2{exe_rkd_value[15:0]}})
@@ -534,6 +680,8 @@ assign exe_fire     = exe_valid && exe_ready_go && mem_allowin;
 
 always @(posedge clk) begin
     if (!resetn)
+        mem_valid <= 1'b0;
+    else if (wb_redirect)
         mem_valid <= 1'b0;
     else if (exe_fire)
         mem_valid <= 1'b1;
@@ -553,6 +701,18 @@ always @(posedge clk) begin
         mem_is_mul       <= 1'b0;
         mem_is_mulh      <= 1'b0;
         mul_prod_mem     <= 64'h0;
+        mem_inst         <= 32'h0340_0000;
+        mem_exc          <= 1'b0;
+        mem_ecode        <= 6'b0;
+        mem_badv_we      <= 1'b0;
+        mem_badv         <= 32'b0;
+        mem_ertn         <= 1'b0;
+        mem_is_csr       <= 1'b0;
+        mem_csr_write    <= 1'b0;
+        mem_csr_xchg     <= 1'b0;
+        mem_csr_num      <= 14'b0;
+        mem_csr_wdata    <= 32'b0;
+        mem_csr_wmask    <= 32'b0;
     end
     else if (exe_fire) begin
         mem_pc           <= exe_pc;
@@ -565,6 +725,18 @@ always @(posedge clk) begin
         mem_is_mul       <= exe_is_mul;
         mem_is_mulh      <= exe_is_mulh;
         mul_prod_mem     <= mul_prod[63:0];
+        mem_inst         <= exe_inst;
+        mem_exc          <= exe_final_exc;
+        mem_ecode        <= exe_final_ecode;
+        mem_badv_we      <= exe_mem_ale || (exe_exc && exe_ecode == 6'h08);
+        mem_badv         <= exe_mem_ale ? exe_alu_result : exe_pc;
+        mem_ertn         <= exe_ertn;
+        mem_is_csr       <= exe_is_csr;
+        mem_csr_write    <= exe_csr_write;
+        mem_csr_xchg     <= exe_csr_xchg;
+        mem_csr_num      <= exe_csr_num;
+        mem_csr_wdata    <= exe_rkd_value;
+        mem_csr_wmask    <= exe_rj_value;
     end
 end
 
@@ -586,6 +758,8 @@ assign wb_fire      = wb_valid && wb_allowin;
 always @(posedge clk) begin
     if (!resetn)
         wb_valid <= 1'b0;
+    else if (wb_redirect)
+        wb_valid <= 1'b0;
     else if (mem_fire)
         wb_valid <= 1'b1;
     else if (wb_fire)
@@ -603,6 +777,18 @@ always @(posedge clk) begin
         wb_mem_size     <= 2'b0;
         wb_ld_uns       <= 1'b0;
         wb_res_from_mem <= 1'b0;
+        wb_inst          <= 32'h0340_0000;
+        wb_exc           <= 1'b0;
+        wb_ecode         <= 6'b0;
+        wb_badv_we       <= 1'b0;
+        wb_badv          <= 32'b0;
+        wb_ertn          <= 1'b0;
+        wb_is_csr        <= 1'b0;
+        wb_csr_write     <= 1'b0;
+        wb_csr_xchg      <= 1'b0;
+        wb_csr_num       <= 14'b0;
+        wb_csr_wdata     <= 32'b0;
+        wb_csr_wmask     <= 32'b0;
     end
     else if (mem_fire) begin
         wb_pc           <= mem_pc;
@@ -614,6 +800,18 @@ always @(posedge clk) begin
         wb_mem_size     <= mem_mem_size;
         wb_ld_uns       <= mem_ld_uns;
         wb_res_from_mem <= mem_res_from_mem;
+        wb_inst          <= mem_inst;
+        wb_exc           <= mem_exc;
+        wb_ecode         <= mem_ecode;
+        wb_badv_we       <= mem_badv_we;
+        wb_badv          <= mem_badv;
+        wb_ertn          <= mem_ertn;
+        wb_is_csr        <= mem_is_csr;
+        wb_csr_write     <= mem_csr_write;
+        wb_csr_xchg      <= mem_csr_xchg;
+        wb_csr_num       <= mem_csr_num;
+        wb_csr_wdata     <= mem_csr_wdata;
+        wb_csr_wmask     <= mem_csr_wmask;
     end
 end
 
@@ -631,9 +829,10 @@ wire [31:0] wb_ld_data = ({32{wb_mem_size[0]}} & {{24{~wb_ld_uns & wb_ld_byte[7]
                        | ({32{wb_mem_size[1]}} & {{16{~wb_ld_uns & wb_ld_half[15]}}, wb_ld_half})
                        | ({32{~|wb_mem_size  }} & wb_sram_rdata);
 
-wire [31:0] wb_result  = wb_res_from_mem ? wb_ld_data : wb_final_result;
+wire [31:0] wb_result  = wb_is_csr ? csr_rdata :
+                         wb_res_from_mem ? wb_ld_data : wb_final_result;
 
-assign rf_we    = wb_gr_we && wb_valid;
+assign rf_we    = wb_gr_we && wb_valid && !wb_exc;
 assign rf_waddr = wb_dest;
 assign rf_wdata = wb_result;
 

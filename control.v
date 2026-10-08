@@ -1,12 +1,14 @@
 // control.v —— 数据冲突检测与前递选择
 // 职责边界：只做纯组合的地址比较与决策，不懂指令语义
-//   - 假读已由 IDU 钳零到 r0，天然不误命中
+//   - rj 地址直接来自指令字段；只在真实使用 rj 时计入停顿
+//   - 前递命中保持纯地址比较，避免译码进入前递数据路径
 //   - WB->ID（d=3）已由 regfile 内部写读旁路解决，这里只比较 EXE/MEM 两级
 module control(
     // 消费侧：ID 级
     input  wire        id_valid,
     input  wire [ 4:0] id_rf_raddr1,
     input  wire [ 4:0] id_rf_raddr2,
+    input  wire        id_rj_used,
 
     // 生产侧：EXE 级间寄存器
     input  wire        exe_valid,
@@ -35,8 +37,8 @@ module control(
 
     // 阻塞：「结果迟到型」生产者（load 数据 WB 拍才写回；mul 乘积多打一拍）
     // load 统一 WB 拍交付：d=1（EXE 级）停两拍、d=2（MEM 级）停一拍，之后由 regfile 写读旁路供给
-    assign id_stall = id_valid & ((exe_res_from_mem | exe_is_mul) & (exe_hit1 | exe_hit2)
-                                | mem_res_from_mem & (mem_hit1 | mem_hit2));
+    assign id_stall = id_valid & ((exe_res_from_mem | exe_is_mul) & ((id_rj_used & exe_hit1) | exe_hit2)
+                                | mem_res_from_mem & ((id_rj_used & mem_hit1) | mem_hit2));
 
     // 前递：就近优先（同地址双命中取 EXE）；load/mul 当拍无结果，不可作 EXE 前递源；
     // MEM 级 load 不可前递（数据未回），但此时 id_stall 拉高，消费者不锁存，此项为无关项
