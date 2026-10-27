@@ -15,6 +15,24 @@ load/store 在 EXE 等待地址握手，进入 MEM 后均等待响应；没有�
 接口遵循本地类 SRAM 环境至少一周期响应的约定；每端不支持多笔 outstanding，也不支持新请求在其接收同沿立即返回。
 CPU/从方中途单独复位后的跨复位事务恢复不在本次实验范围，整套环境共同复位。
 
+## 根据时序路径完成的两项调整
+
+基础路线通过功能仿真后，又根据实际网表路径作了两项调整：
+
+1. 取指 `req` 不再直接受组合 `redirect` 门控，避免 EXE 地址/握手/分支链进入高扇出的指令 RAM 使能。
+   若旧地址恰好在重定向同沿被接收，转入 DROP 并消耗它的响应。控制状态保证旧指令不进入 ID；
+   “地址接收与冲刷同拍”已有单独的 XSIM 测试。
+2. EXE 内增加一组请求寄存器，保存地址、写数据、字节选通、size 和 wr。
+   只在 MEM 空且当前指令没有异常、更老指令不会重定向时分配请求；下一拍再参与总线握手。
+   EXE 仍停留到请求接收，不增加并发事务数；MEM、WB 和精确异常规则不变。
+   这切断了 ALU→地址译码→addr_ok→EXE 级使能的长组合链，每笔访存增加一拍内部准备。
+
+时钟 IP 明确使用 PLL 原语，以保持实验自带 XDC 的 PLLE2_ADV 引脚引用有效。
+初次采用工具默认 MMCM 的生成目录 `build/exp14` 不用于时序签核；
+最终工程为 `build/exp14_final`，包含数据请求寄存的 RTL SHA-256 见 `validation/exp14/functional_results.json`。
+功能回归日志继续保存在第一次导出的 XSIM 目录旁，但每次都重新编译根目录当前 RTL；
+仿真采用 SoC 自带的时钟旁路，PLL/MMCM 差异不参与功能仿真。
+
 ## Vivado 官方 SoC 功能验证
 
 使用原 exp14 `soc_hs_bram` 的 SoC、bridge_1x2、sram_wrap 和 confreg 逻辑，
@@ -52,8 +70,37 @@ CPU/从方中途单独复位后的跨复位事务恢复不在本次实验范围�
 
 ## 时序验证
 
-进行中：完整 SoC，100 MHz CPU 与 100 MHz timer，综合及布线结果尚待报告。
-最终结果写入本节后才能认定时序通过；exp13 旧报告中的 WNS 不用于本版本签核。
+**通过：完整 SoC 已完成布局布线，CPU 和 timer 均为 100 MHz。**
+
+| 指标 | 最终值 |
+| --- | ---: |
+| 时钟周期 | 10.000 ns |
+| WNS / TNS | +0.209 ns / 0.000 ns |
+| 建立时间失败端点 | 0 / 13014 |
+| WHS / THS | +0.051 ns / 0.000 ns |
+| 保持时间失败端点 | 0 / 13014 |
+| 最小脉宽裕量 WPWS | +3.000 ns |
+| 无时钟的寄存器时序端点 | 0 |
+| 未约束的内部时序端点 | 0 |
+| LUT / 寄存器 | 3284 / 2679 |
+| RAMB36 / DSP | 320 / 4 |
+
+Vivado 报告明确给出 `All user specified timing constraints are met.`。
+签核由重新打开最终 `soc_lite_top_routed.dcp` 独立导出，脚本退出码 0，
+与功能验证所记录的根目录 RTL SHA-256 一致。源码阶段提交为 `056748b`。
+
+报告已复制到 `validation/exp14/`，含 `timing_100MHz.rpt`、`check_timing_100MHz.rpt`、
+`clocks_100MHz.rpt`、`utilization_100MHz.rpt`、`drc_100MHz.rpt`，以及机器可读的
+`functional_results.json`、`timing_results.json` 和精简的 `functional_summary.txt`。
+
+签核范围沿用实验自带 XDC：CPU↔timer 的两条 false path 保留，未另外添加例外来隐藏 CPU 内部违例。
+实验 XDC 未给 15 个板级输入和 71 个板级输出配置外部延迟，因此本结果表示实验约束范围内的内部同步时序通过，
+不代表已完成板级 I/O 或 CDC 的全面签核。DRC 为 0 错误、15 警告，涉及配置电压属性缺省及 DSP 流水建议；
+未猜测实际板卡的配置电压，也未生成 bitstream 或执行实体上板。
+
+早期生成工程没有进入最终签核；最终结果不引用 exp13 的时序报告。
+Vivado 仅运行到 route_design 时，运行进度未必为 100%；脚本已改按步骤状态判断，
+并允许用 `signoff` 直接检查已布线的不可变检查点，避免把 GUI 运行进度当成时序结论。
 
 ## 复现
 
@@ -67,6 +114,10 @@ CPU/从方中途单独复位后的跨复位事务恢复不在本次实验范围�
 & 'D:/vivado2025/2025.2/Vivado/bin/vivado.bat' -mode batch -source scripts/exp14_vivado.tcl -tclargs impl 0x5501ff 100
 ```
 
+完成一次 `sim` 导出后，可用 `./scripts/exp14_fast_regress.ps1` 直接调用 Vivado XSIM 重跑五个种子。
+若只需从已完成布线的检查点重新导出签核报告，使用同一 Tcl 的 `-tclargs signoff 0x5501ff 100`。
+若需在 Vivado 中直接查看已布线设计，可 `open_checkpoint build/exp14_final/project/exp14.runs/impl_1/soc_lite_top_routed.dcp`。
+
 脚本读取仓库上一级 `output/exp14`，生成项目 `build/exp14_final/project/exp14.xpr`。
 Vivado 项目直接引用根目录 CPU 源码；无需同时往工程加入另一套同名模块。
 `create` 会重建本任务的生成项目，请勿对有手工改动的生成项目直接重建。
@@ -75,4 +126,4 @@ Vivado 项目直接引用根目录 CPU 源码；无需同时往工程加入另�
 
 工作分支 `codex/exp14-hs-sram`。阶段提交 `adafcf4` 保存首次通过短延迟完整 func 的实现。
 不执行 push，不添加 Co-author，不修改同学的历史提交或其它未跟踪教学资料。
-本次尚未进行实体开发板下载验证，不把仿真或布线结果称为上板通过。
+本次未进行实体开发板下载验证，不把仿真或布线结果称为上板通过。

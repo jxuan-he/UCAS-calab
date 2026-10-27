@@ -1,0 +1,40 @@
+{
+  "tool": "Vivado 2025.2",
+  "part": "xc7a200tfbg676-1",
+  "state": "Fully Routed",
+  "cpu_mhz": 100,
+  "timer_mhz": 100,
+  "wns_ns": 0.209,
+  "tns_ns": 0.0,
+  "setup_failing_endpoints": 0,
+  "whs_ns": 0.051,
+  "ths_ns": 0.0,
+  "hold_failing_endpoints": 0,
+  "wpws_ns": 3.0,
+  "no_clock": 0,
+  "unconstrained_internal_endpoints": 0,
+  "missing_external_input_delays": 15,
+  "missing_external_output_delays": 71,
+  "resources": {
+    "LUT": 3284,
+    "registers": 2679,
+    "RAMB36": 320,
+    "DSP": 4
+  },
+  "drc_errors": 0,
+  "drc_warnings": 15,
+  "standard_cpu_timer_false_paths_preserved": true,
+  "bitstream_generated": false,
+  "hardware_tested": false,
+  "routed_checkpoint_sha256": "b35386238b56ab2cb7353c95cc5324a35ac412b11fa271fafd063e50440a6ac5",
+  "rtl_sha256": {
+    "mycpu_top.v": "fe2fc771b42f92885a12ca0ddcce4582831d09f78cc354fd436bf1964eea7721",
+    "IF_PC.v": "84a79c2c4991288d9b5230524bfdcef655878a6d7e20811a15d42767f335c719",
+    "IDU.v": "afabecc6f288c60a54ecb0eb0499201b2da3d91ac0f82b42f1a215c26b179f03",
+    "CP0.v": "54e3e34a71a6cac3678752a49846154480eba1f9c3a8ab2fe1c343335f7a5b85",
+    "control.v": "bb69dec765337734ff91c7d66ed30751b8abb289ce2dbac5946f5d7ebcea00a4",
+    "regfile.v": "09247a7762d43de1efb832699dcb4f311ab1933c9145c3497950520e5c0eee13",
+    "alu.v": "26de841231a9400e3df3af1899fd7169798be861441ed14047ebb2202c450f0d",
+    "div_gen.v": "f22e824e3b6c4281504098cb44a0e5496013abde6c99520e774e569b1792a7ec"
+  }
+}

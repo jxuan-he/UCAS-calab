@@ -19,6 +19,7 @@ proc write_text {path s} {set f [open $path w]; puts -nonewline $f $s; close $f}
 
 # Keep the vendor testbench, RAM wrapper, bridge and confreg behavior intact.
 # Only make trace location absolute, select a reproducible seed, and add checks.
+if {$mode ne "signoff"} {
 set conf [read_text [file join $soc rtl CONFREG confreg.v]]
 regsub {`define RANDOM_SEED[^\n]*} $conf "`define RANDOM_SEED 23'h[format %06x $seed]" conf
 write_text [file join $work generated confreg.v] $conf
@@ -26,6 +27,8 @@ set tb [read_text [file join $soc testbench mycpu_tb.v]]
 regsub {`define TRACE_REF_FILE[^\n]*} $tb "`define TRACE_REF_FILE \"[file join $envroot gettrace golden_trace.txt]\"" tb
 set tb [string map [list "module tb_top( );" "module tb_top( );\nexp14_bus_monitor bus_checks();"] $tb]
 write_text [file join $work generated mycpu_tb.v] $tb
+
+}
 
 if {$mode eq "create"} {
     create_project exp14 [file join $work project] -part xc7a200tfbg676-1 -force
@@ -72,7 +75,13 @@ if {$mode eq "create"} {
     close_project
     puts "EXP14_PROJECT_READY $work"
 } else {
-    open_project [file join $work project exp14.xpr]
+    if {$mode eq "signoff"} {
+        # Read the immutable routed result even if an interrupted controller did
+        # not persist its GUI run-status bookkeeping into the .xpr file.
+        open_checkpoint [file join $work project exp14.runs impl_1 soc_lite_top_routed.dcp]
+    } else {
+        open_project [file join $work project exp14.xpr]
+    }
     if {$mode eq "sim" || $mode eq "regress"} {
         if {$mode eq "regress"} {set seeds {0x5500ff 0x550001 0x551234 0x5527ff}} else {set seeds [list $seed]}
         foreach runseed $seeds {
@@ -107,7 +116,10 @@ if {$mode eq "create"} {
         wait_on_run impl_1
         if {![string match {*route_design Complete*} [get_property STATUS [get_runs impl_1]]]} {error "routing did not complete"}
       }
-        open_run impl_1
+        if {$mode eq "impl"} {
+            open_run impl_1
+            puts "EXP14_RUN_STATUS=[get_property STATUS [get_runs impl_1]] PROGRESS=[get_property PROGRESS [get_runs impl_1]]"
+        }
         report_timing_summary -delay_type min_max -report_unconstrained -max_paths 10 \
             -file [file join $work reports timing_${mhz}MHz.rpt]
         report_utilization -file [file join $work reports utilization_${mhz}MHz.rpt]
@@ -121,5 +133,5 @@ if {$mode eq "create"} {
         puts "EXP14_ROUTE_MHZ=$mhz WNS=$wns WHS=$whs"
         if {$wns < 0 || $whs < 0} {error "routed timing failed; inspect timing report"}
     } else {error "unknown mode: $mode"}
-    close_project
+    if {$mode eq "signoff"} {close_design} else {close_project}
 }
