@@ -1,0 +1,7 @@
+/build/
+/tmp/
+/output/
+*.jou
+*.log
+*.pb
+/.Xil/

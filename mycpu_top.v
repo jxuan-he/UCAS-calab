@@ -2,14 +2,22 @@ module mycpu_top(
     input  wire        clk,
     input  wire        resetn,
 
-    output wire        inst_sram_en,
-    output wire [ 3:0] inst_sram_we,
+    output wire        inst_sram_req,
+    output wire        inst_sram_wr,
+    output wire [ 1:0] inst_sram_size,
+    output wire [ 3:0] inst_sram_wstrb,
+    input  wire        inst_sram_addr_ok,
+    input  wire        inst_sram_data_ok,
     output wire [31:0] inst_sram_addr,
     output wire [31:0] inst_sram_wdata,
     input  wire [31:0] inst_sram_rdata,
 
-    output wire        data_sram_en,
-    output wire [ 3:0] data_sram_we,
+    output wire        data_sram_req,
+    output wire        data_sram_wr,
+    output wire [ 1:0] data_sram_size,
+    output wire [ 3:0] data_sram_wstrb,
+    input  wire        data_sram_addr_ok,
+    input  wire        data_sram_data_ok,
     output wire [31:0] data_sram_addr,
     output wire [31:0] data_sram_wdata,
     input  wire [31:0] data_sram_rdata,
@@ -21,19 +29,11 @@ module mycpu_top(
 
 // ================== 顶层信号声明 ==================
 
-// IF1
-wire [31:0] if1_pc;
-wire        if1_fire;
-wire        if1_kill;      // IF1 侧标记：本拍 fire 的地址是错误路径
-reg         if1_fire_r;
-reg         if1_kill_r;    // 标记本次到达的响应该丢弃
-
-// IF2
+// IF1/IF2: request identity and response buffer live in IF_PC.
 wire        if2_fire;
-wire        if2_allowin;
-reg         if2_valid;
-reg  [31:0] if2_pc;
-reg  [31:0] if2_inst;
+wire        if2_valid;
+wire [31:0] if2_pc;
+wire [31:0] if2_inst;
 wire [31:0] if2_pc_out;
 wire [31:0] if2_inst_out;
 
@@ -165,6 +165,7 @@ wire [ 5:0] exe_final_ecode = exe_exc ? exe_ecode : 6'h09;
 
 // MEM 级间寄存器
 reg         mem_valid;
+reg         mem_wait_resp;
 reg  [31:0] mem_pc;
 reg  [31:0] mem_alu_result;
 reg         mem_res_from_mem;
@@ -247,92 +248,29 @@ wire [31:0] alu_src1;
 wire [31:0] alu_src2;
 
 
-// ================== 1. IF1 实例化 ==================
-
+// ================== IF1/IF2 handshaking fetch ==================
+wire fetch_redirect = wb_redirect || exe_br_taken;
 IF_PC u_if_pc(
-    .clk            (clk),
-    .resetn         (resetn),
-    .if2_allowin    (if2_allowin),
-    .if1_fire       (if1_fire),
-    .br_taken       (exe_br_taken),
-    .br_target      (exe_br_target),
-    .trap_redirect  (wb_redirect),
-    .trap_target    (wb_trap ? cp0_eentry : cp0_era),
-    .inst_sram_en   (inst_sram_en),
-    .inst_sram_addr (inst_sram_addr),
-    .if1_kill       (if1_kill),
-    .if1_pc         (if1_pc)
+    .clk(clk), .resetn(resetn),
+    .redirect(fetch_redirect),
+    .redirect_target(wb_redirect ? (wb_trap ? cp0_eentry : cp0_era) : exe_br_target),
+    .id_allowin(id_allowin),
+    .fetch_valid(if2_valid), .fetch_pc(if2_pc), .fetch_inst(if2_inst),
+    .inst_sram_req(inst_sram_req), .inst_sram_addr(inst_sram_addr),
+    .inst_sram_addr_ok(inst_sram_addr_ok),
+    .inst_sram_data_ok(inst_sram_data_ok),
+    .inst_sram_rdata(inst_sram_rdata)
 );
-
-assign inst_sram_we    = 4'b0;
+assign inst_sram_wr = 1'b0;
+assign inst_sram_size = 2'd2;
+assign inst_sram_wstrb = 4'b0;
 assign inst_sram_wdata = 32'b0;
-
-
-// ================== 2. 顶层 IF2 逻辑 ==================
-
-assign if2_pc_out   = if2_pc;
-assign if2_inst_out = if1_fire_r ? inst_sram_rdata : if2_inst;
-
-// 被 kill 标记占位的槽位（错误路径响应当拍到达）视为空槽，允许接收新请求
-assign if2_allowin = ~if2_valid || if2_fire || if1_kill_r;
-assign if1_fire    = inst_sram_en && if2_allowin;
-// CSR instructions are rare; serialize them through WB to avoid CSR hazards.
+assign if2_pc_out = if2_pc;
+assign if2_inst_out = if2_inst;
+assign if2_fire = if2_valid && id_allowin;
 assign id_ready_go = ~id_stall && ~csr_inflight;
-assign id_allowin  = ~id_valid || (id_ready_go && exe_allowin);
-// kill 标记的槽位是错误路径响应：允许被新请求覆盖（见 if2_allowin），但绝不允许流向 ID
-// （exp8 纯阻塞下 bl/jirl 在 EXE 与 ID 阻塞同拍会触发 pend，kill 槽位到达时 ID 已空，不加门控会漏进 ID）
-assign if2_fire    = if2_valid && id_allowin && ~if1_kill_r;
+assign id_allowin = ~id_valid || (id_ready_go && exe_allowin);
 
-always @(posedge clk) begin
-    if (!resetn)
-        if2_valid <= 1'b0;
-    else if (wb_redirect || exe_br_taken)
-        if2_valid <= 1'b0;
-    else if (if1_fire)
-        if2_valid <= 1'b1;
-    else if (if2_fire)
-        if2_valid <= 1'b0;
-end
-
-always @(posedge clk) begin
-    if (!resetn)
-        if2_pc <= 32'h1c000000;
-    else if (if1_fire)
-        if2_pc <= if1_pc;
-end
-
-always @(posedge clk) begin
-    if (!resetn)
-        if2_inst <= 32'h0340_0000;   // andi $r0,$r0,0 = LoongArch NOP
-    else if (if2_fire | if1_kill_r)
-        if2_inst <= 32'h0340_0000;
-    else if (if1_fire_r)
-        if2_inst <= inst_sram_rdata;
-end
-
-always @(posedge clk) begin
-    if (!resetn) begin
-        if1_kill_r <= 1'b0;
-    end
-    else if (if1_fire) begin
-        if1_kill_r <= if1_kill;
-    end
-    else if (if2_fire) begin
-        if1_kill_r <= 1'b0;
-    end
-end
-
-always @(posedge clk) begin
-    if (!resetn) begin
-        if1_fire_r <= 1'b0;
-    end
-    else if (if1_fire) begin
-        if1_fire_r <= 1'b1;
-    end
-    else  begin
-        if1_fire_r <= 1'b0;
-    end
-end
 // ================== 3. IF2 -> ID 级间寄存器 ==================
 
 // id_valid：fire 进则置位，fire 出则清零；分支冲刷最高优先级
@@ -603,6 +541,9 @@ wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
 wire        exe_is_div     = exe_is_div_w | exe_is_mod_w | exe_is_div_wu | exe_is_mod_wu;
 wire        exe_div_uns    = exe_is_div_wu | exe_is_mod_wu;
 reg         div_doing;
+reg         div_result_valid;
+reg [31:0]  div_result_buf;
+reg         div_cancelled;
 
 wire [31:0] div_a_abs = (~exe_div_uns & exe_alu_src1[31]) ? ~exe_alu_src1 + 32'd1 : exe_alu_src1;
 wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd1 : exe_alu_src2;
@@ -611,22 +552,44 @@ wire        div_q_neg = ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
 wire        div_r_neg = ~exe_div_uns &  exe_alu_src1[31];
 
 // NonBlocking 模式无 tready：tvalid 打一拍即被接收；div_doing 保证一次只启动一单
-wire        div_tvalid = exe_valid & exe_is_div & ~div_doing &
-                         ~older_redirect_pending;
+wire        div_tvalid = resetn && exe_valid && exe_is_div && !div_doing &&
+                         !div_result_valid && !exe_final_exc &&
+                         !older_redirect_pending && !wb_redirect;
 wire        div_dout_tvalid;
 wire [63:0] div_dout_tdata;
 
 wire div_in_fire = div_tvalid;
 wire div_done    = div_dout_tvalid;
 
+// Completion may precede MEM availability. Retain the result until EXE fires.
+// Cancelled operations are drained before the divider accepts another request.
 always @(posedge clk) begin
-    if (!resetn)          div_doing <= 1'b0;
-    else if (div_in_fire) div_doing <= 1'b1;
-    else if (div_done)    div_doing <= 1'b0;
+    if (!resetn) begin
+        div_doing <= 1'b0;
+        div_result_valid <= 1'b0;
+        div_result_buf <= 32'b0;
+        div_cancelled <= 1'b0;
+    end else begin
+        if (div_in_fire) begin
+            div_doing <= 1'b1;
+            div_cancelled <= 1'b0;
+        end
+        if (div_done) div_doing <= 1'b0;
+        if (wb_redirect) begin
+            div_result_valid <= 1'b0;
+            div_cancelled <= div_doing && !div_done;
+        end else if (div_done && div_doing && !div_cancelled) begin
+            div_result_buf <= div_result;
+            div_result_valid <= 1'b1;
+        end
+        if (exe_fire) div_result_valid <= 1'b0;
+        if (div_done) div_cancelled <= 1'b0;
+    end
 end
 
 div_gen u_div (
     .aclk                   (clk),
+    .aresetn                (resetn),
     .s_axis_dividend_tvalid (div_tvalid),
     .s_axis_dividend_tdata  (div_a_abs),
     .s_axis_divisor_tvalid  (div_tvalid),
@@ -644,14 +607,14 @@ wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 
 // EXE 最终输出（ALU/除；乘法走 mul_prod_mem），下游 MEM 锁存与前递统一看 exe_result
 assign exe_result = exe_is_rdcnt ? exe_rdcnt_value :
-                    exe_is_div ? div_result : exe_alu_result;
+                    exe_is_div ? (div_result_valid ? div_result_buf : div_result) : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0；blt/bge/bltu/bgeu 复用 slt/sltu 结果最低位
 // 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
 // 位掩码：各分支类型 one-hot 互斥，条件位收集后归约或
 assign exe_rj_eq_rkd = (exe_alu_result == 32'b0);
 wire   exe_rj_lt_rkd = exe_alu_result[0];
-assign exe_br_taken = exe_valid & ~exe_final_exc & ~older_redirect_pending &
+assign exe_br_taken = exe_fire & ~exe_final_exc & ~older_redirect_pending &
                              (exe_is_beq  &  exe_rj_eq_rkd
                                  | exe_is_bne  & ~exe_rj_eq_rkd
                                  | exe_is_blt  &  exe_rj_lt_rkd
@@ -662,11 +625,16 @@ assign exe_br_taken = exe_valid & ~exe_final_exc & ~older_redirect_pending &
 
 // 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
 // 位掩码三选一：字节道移位（st.b 单道 / st.h 半字对齐双道 / st.w 全道），写数据车道复制免对位
-assign data_sram_en    = exe_valid && (exe_res_from_mem || exe_mem_we) &&
-                         ~exe_final_exc && ~older_redirect_pending;
-assign data_sram_we    = ({4{data_sram_en & exe_mem_we & exe_mem_size[0]}} & (4'b0001 <<  exe_alu_result[1:0]     ))
-                       | ({4{data_sram_en & exe_mem_we & exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1], 1'b0}))
-                       | ({4{data_sram_en & exe_mem_we & ~|exe_mem_size  }} &  4'hf                                  );
+// One data transaction at a time. MEM is reserved on the acceptance edge.
+wire exe_is_mem = exe_res_from_mem || exe_mem_we;
+wire data_addr_fire = data_sram_req && data_sram_addr_ok;
+assign data_sram_req = resetn && exe_valid && exe_is_mem && !mem_valid &&
+                       !exe_final_exc && !older_redirect_pending;
+assign data_sram_wr = exe_mem_we;
+assign data_sram_size = exe_mem_size[0] ? 2'd0 : exe_mem_size[1] ? 2'd1 : 2'd2;
+assign data_sram_wstrb = ({4{exe_mem_we && exe_mem_size[0]}} & (4'b0001 << exe_alu_result[1:0]))
+                       | ({4{exe_mem_we && exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1],1'b0}))
+                       | ({4{exe_mem_we && !(|exe_mem_size)}} & 4'hf);
 assign data_sram_addr  = exe_alu_result;
 assign data_sram_wdata = ({32{exe_mem_size[0]}} & {4{exe_rkd_value[ 7:0]}})
                        | ({32{exe_mem_size[1]}} & {2{exe_rkd_value[15:0]}})
@@ -674,7 +642,10 @@ assign data_sram_wdata = ({32{exe_mem_size[0]}} & {4{exe_rkd_value[ 7:0]}})
 
 // ================== 10. EXE -> MEM 级间寄存器 ==================
 
-assign exe_ready_go = ~exe_is_div | div_done;
+assign exe_ready_go = exe_final_exc ? 1'b1 :
+                      exe_is_mem ? data_addr_fire :
+                      exe_is_div ? (div_result_valid || (div_done && div_doing && !div_cancelled)) :
+                      1'b1;
 assign mem_allowin  = ~mem_valid || (mem_ready_go && wb_allowin);
 assign exe_fire     = exe_valid && exe_ready_go && mem_allowin;
 
@@ -691,6 +662,7 @@ end
 
 always @(posedge clk) begin
     if (!resetn) begin
+        mem_wait_resp    <= 1'b0;
         mem_pc           <= 32'h1c000000;
         mem_alu_result   <= 32'h0;
         mem_res_from_mem <= 1'b0;
@@ -715,6 +687,7 @@ always @(posedge clk) begin
         mem_csr_wmask    <= 32'b0;
     end
     else if (exe_fire) begin
+        mem_wait_resp    <= data_addr_fire;
         mem_pc           <= exe_pc;
         mem_alu_result   <= exe_result;   // 已是 ALU/除 选完的最终结果
         mem_res_from_mem <= exe_res_from_mem;
@@ -750,7 +723,7 @@ assign mem_final_result = ({32{mem_is_mul & mem_is_mulh}} & mul_prod_mem[63:32] 
 
 // ================== 12. MEM -> WB 级间寄存器 ==================
 
-assign mem_ready_go = 1'b1;
+assign mem_ready_go = !mem_wait_resp || data_sram_data_ok;
 assign wb_allowin   = 1'b1;
 assign mem_fire     = mem_valid && mem_ready_go && wb_allowin;
 assign wb_fire      = wb_valid && wb_allowin;

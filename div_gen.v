@@ -2,6 +2,7 @@
 // One request is accepted at a time; EXE remains stalled until tvalid returns.
 module div_gen(
     input  wire        aclk,
+    input  wire        aresetn,
     input  wire        s_axis_dividend_tvalid,
     input  wire [31:0] s_axis_dividend_tdata,
     input  wire        s_axis_divisor_tvalid,
@@ -29,7 +30,11 @@ end
 
 always @(posedge aclk) begin
     m_axis_dout_tvalid <= 1'b0;
-    if (count != 0) begin
+    if (!aresetn) begin
+        count <= 0;
+        m_axis_dout_tvalid <= 0;
+        m_axis_dout_tdata <= 0;
+    end else if (count != 0) begin
         quotient <= next_quotient;
         remainder <= next_remainder;
         count <= count - 6'd1;

@@ -1,80 +1,53 @@
+// One outstanding fetch with a response buffer and explicit cancelled-request drain.
 module IF_PC(
-    input         clk,
-    input         resetn,
-
-    // 反压：IF2 允许接收时才发起取指
-    input         if2_allowin,
-
-    // 传递成功：IF1->IF2 链路打通，允许更新 PC
-    input         if1_fire,
-
-    // 跳转（来自 EX 级，经顶层转发）
-    input         br_taken,
-    input  [31:0] br_target,
-
-    // WB exception/ERTN has priority over a younger EXE branch.
-    input         trap_redirect,
-    input  [31:0] trap_target,
-
-    // 指令 BRAM 接口
-    output        inst_sram_en,     // 高有效：IF2 能收且非复位时才读
-    output [31:0] inst_sram_addr,   // 当前 PC
-    output        if1_kill,         // 本拍若 fire，其地址必为错误路径（pend 装填拍或 br_taken 拍）
-                                    // 标记随请求发出，响应到达时由 IF2 丢弃对应指令
-
-    // 输出
-    output [31:0] if1_pc            // 当前 PC 寄存器值
+    input wire clk, input wire resetn,
+    input wire redirect, input wire [31:0] redirect_target,
+    input wire id_allowin,
+    output wire fetch_valid,
+    output reg [31:0] fetch_pc, output reg [31:0] fetch_inst,
+    output wire inst_sram_req, output wire [31:0] inst_sram_addr,
+    input wire inst_sram_addr_ok, input wire inst_sram_data_ok,
+    input wire [31:0] inst_sram_rdata
 );
-
-    // ================== 挂起重定向 ==================
-    // br_taken 当拍若 fire 不出去（前端被数据冲突 stall 反压），
-    // 跳转目标会随 br_taken 一拍后消失而丢失，故锁存进 pending：
-    // 下一拍把 pend_target 装填进 pc。装填拍照常 fire（握手连续性），
-    // 但此时地址还是旧 pc，属错误路径，由 if1_kill 标记、IF2 收到后置 NOP。
-    // pend_valid 与新的 br_taken 互斥：每次 br_taken 必冲刷前端，
-    // pending 存活期（1拍）内不可能有新分支流到 EXE。
-    reg        pend_valid;
-    reg [31:0] pend_target;
-
-    wire br_miss_fire = br_taken & ~if1_fire & ~trap_redirect;
-
-    always @(posedge clk) begin
-        if (!resetn) begin
-            pend_valid  <= 1'b0;
-            pend_target <= 32'h0;
-        end
-        else if (trap_redirect)
-            pend_valid <= 1'b0;
-        else if (br_miss_fire) begin
-            pend_valid  <= 1'b1;
-            pend_target <= br_target;
-        end
-        else if (pend_valid)            // 装填进 pc 的同一拍释放
-            pend_valid <= 1'b0;
+localparam EMPTY=2'd0, WAIT=2'd1, HAVE=2'd2, DROP=2'd3;
+reg [1:0] state;
+reg [31:0] next_pc;
+wire adef = |next_pc[1:0];
+wire addr_fire = inst_sram_req && inst_sram_addr_ok;
+assign inst_sram_req = resetn && state==EMPTY && !redirect && !adef;
+assign inst_sram_addr = next_pc;
+assign fetch_valid = resetn && state==HAVE && !redirect;
+always @(posedge clk) begin
+    if (!resetn) begin
+        state <= EMPTY;
+        next_pc <= 32'h1c00_0000;
+        fetch_pc <= 32'h1c00_0000;
+        fetch_inst <= 32'h0340_0000;
+    end else if (redirect) begin
+        next_pc <= redirect_target;
+        // If data_ok is high, the cancelled response is consumed on this edge.
+        if ((state==WAIT || state==DROP) && !inst_sram_data_ok)
+            state <= DROP;
+        else state <= EMPTY;
+    end else begin
+        case (state)
+            EMPTY: if (adef || addr_fire) begin
+                fetch_pc <= next_pc;
+                next_pc <= next_pc + 32'd4;
+                if (adef) begin
+                    // No bus transaction: carry the original bad PC into ID.
+                    fetch_inst <= 32'h0340_0000;
+                    state <= HAVE;
+                end else state <= WAIT;
+            end
+            WAIT: if (inst_sram_data_ok) begin
+                fetch_inst <= inst_sram_rdata;
+                state <= HAVE;
+            end
+            HAVE: if (id_allowin) state <= EMPTY;
+            DROP: if (inst_sram_data_ok) state <= EMPTY;
+            default: state <= EMPTY;
+        endcase
     end
-
-    reg  [31:0] pc;
-
-    wire [31:0] next_pc = trap_redirect ? trap_target :
-                          pend_valid    ? pend_target :
-                          br_taken      ? br_target : (pc + 32'h4);
-
-    always @(posedge clk) begin
-        if (!resetn)
-            pc <= 32'h1c000000;         // 同步复位到程序入口
-        else if (trap_redirect | pend_valid | if1_fire)
-            pc <= next_pc;
-    end
-
-    // ================== 输出 ==================
-    assign if1_pc         = pc;
-    assign inst_sram_addr = pc;
-
-    // 语义：IF2 能收我就读，复位期间不读。
-    // pend 装填拍也照常发请求（握手连续性：已发起的事务不可撤回，
-    // 将来换真实内存亦然），错误路径的响应由 if1_kill 标记、IF2 丢弃
-    // assign inst_sram_en   = if2_allowin & resetn;
-    assign inst_sram_en   = resetn;
-    assign if1_kill       = pend_valid | br_taken | trap_redirect;
-
+end
 endmodule
