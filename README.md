@@ -1,9 +1,23 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
-基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现，对接龙芯实验环境（类 SRAM 接口）。
-当前支持 exp12 的 syscall 例外和 exp13 的通用例外、软件中断、定时器中断及稳定计数器。
-`environment/exp12` 与 `environment/exp13` 的 `myCPU` 目录均已放入对应 RTL。
-两套工程的 PLL 配置要求 `cpu_clk=100MHz`，时序结果以各自的布线报告为准。
+基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现。根目录当前为 exp14 类 SRAM 握手接口版本，
+在 exp12/exp13 的异常、软件/定时器中断和稳定计数器基础上支持随机访存延迟。
+
+## exp14 本地工程入口
+
+取指和数据各最多一笔未响应事务；IF_PC 管理 EMPTY/WAIT/HAVE/DROP，缓存返回指令并排空被取消的请求。
+EXE 等地址接收，MEM 等读或写响应；分支与自身的 EXE 转移事件对齐，除法完成结果可在 MEM 反压期间保持。
+load 仍在 WB 抽取/扩展，不增加 MEM load 前递。当前主接口以实验环境的至少一周期响应为前提。
+
+- 实现与验证说明：[docs/exp14_validation.md](docs/exp14_validation.md)。
+- 云端讲义位置：[docs/讲义云端索引.md](docs/讲义云端索引.md)。
+- 官方 SoC 与 Xilinx RAM IP 工程脚本：`scripts/exp14_vivado.tcl`。
+- Vivado 定向测试：`scripts/exp14_directed.ps1`。
+- 实验环境读取自仓库上一级的 `output/exp14/`，生成工程在 `build/exp14/project/exp14.xpr`。
+- 本地提交保留改造阶段；没有执行 push。exp13 基线为 `56138f0`。
+
+下面第 3～9 节主要保留早期同步 BRAM 设计的结构、优化和演进背景；其中取指常开、固定下一拍返回、
+旧 IF1 pending 逻辑不再描述当前 exp14 接口行为。当前实现和测试结果以 exp14 验证说明为准。
 
 ## 1. 已支持的指令
 
@@ -32,14 +46,14 @@
 
 ```
 mycpu_top.v    顶层：六级流水骨架，全部级间寄存器、握手、前递 MUX、访存接口
-IF_PC.v        IF1 级：PC 寄存器、取指请求、分支重定向（含 pend 挂起）
+IF_PC.v        IF1/IF2：取指握手、PC/指令缓存、重定向及旧响应丢弃
 IDU.v          ID 级：指令译码，生成 ALU 操作码/立即数/读写控制/分支目标
 CP0.v          实验 CP0 模块：LoongArch32 CSR、软件/定时器中断、稳定计数器
 control.v      数据冲突检测：load-use 阻塞 + EXE/MEM 前递选择（纯组合；MEM 级 load 不前递）
 alu.v          EXE 级：12 种操作的组合逻辑 ALU
 regfile.v      32×32 寄存器堆，r0 恒 0，内部写读旁路
 div_gen.v      迭代无符号除法器，兼容 Vivado 2019.2
-tests/         同步例外与精确冲刷的 Icarus Verilog 集成仿真
+tests/         exp14 取指、后端长等待压力测试和官方 SoC 总线守恒检查
 ```
 
 原仓库 `ip/div_gen/` 是 Vivado 2023.2 产物。exp12/exp13 改用同名的

@@ -2,6 +2,7 @@
 module tb_exp14_stress;
 reg clk=0; always #5 clk=~clk;
 reg resetn=0;
+reg ipending=0,dpending=0;
 wire iq,iw,dq,dw; wire [1:0] isz,dsz; wire [3:0] ist, dst;
 wire [31:0] ia,idataw,da,ddataw,pc,wd;
 reg iok=0,dok=0; reg [31:0] idatar=0,ddatar=0;
@@ -14,7 +15,6 @@ mycpu_top dut(.clk(clk),.resetn(resetn),
  .data_sram_addr(da),.data_sram_wdata(ddataw),.data_sram_addr_ok(daok),.data_sram_data_ok(dok),.data_sram_rdata(ddatar),
  .debug_wb_pc(pc),.debug_wb_rf_we(we),.debug_wb_rf_wnum(wn),.debug_wb_rf_wdata(wd));
 reg [31:0] rom[0:63],mem[0:127],regs[0:31];
-reg ipending=0,dpending=0;
 reg [31:0] iaddr; integer countdown=0;
 integer i,b,cycles=0,div_starts=0,held=0,branch_wait=0,writes=0;
 function [31:0] ri(input [31:0] op,input integer rd,rj,imm);

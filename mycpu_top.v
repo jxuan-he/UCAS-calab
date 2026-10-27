@@ -535,15 +535,16 @@ wire [32:0] mul_a       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src1[31], exe_alu_src
 wire [32:0] mul_b       = {exe_is_mulh_wu ? 1'b0 : exe_alu_src2[31], exe_alu_src2};
 wire [65:0] mul_prod    = $signed(mul_a) * $signed(mul_b);
 
-// ================== 除法器（exp10，Xilinx Divider Generator IP × 1） ==================
-// 无符号 IP + 外层符号处理：有符号除法取绝对值送入，出结果恢复符号
-// 符号/绝对值全部组合现算：除法驻留期间 EXE 冻结（ready_go=0），操作数全程稳定
+// ================== Iterative divider and retained completion ==================
+// Unsigned RTL division plus external sign restoration. Operands remain stable
+// while EXE is blocked; a completed result is buffered if MEM is still waiting.
 wire        exe_is_div     = exe_is_div_w | exe_is_mod_w | exe_is_div_wu | exe_is_mod_wu;
 wire        exe_div_uns    = exe_is_div_wu | exe_is_mod_wu;
 reg         div_doing;
 reg         div_result_valid;
 reg [31:0]  div_result_buf;
 reg         div_cancelled;
+wire [31:0] div_result;
 
 wire [31:0] div_a_abs = (~exe_div_uns & exe_alu_src1[31]) ? ~exe_alu_src1 + 32'd1 : exe_alu_src1;
 wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd1 : exe_alu_src2;
@@ -551,7 +552,7 @@ wire [31:0] div_b_abs = (~exe_div_uns & exe_alu_src2[31]) ? ~exe_alu_src2 + 32'd
 wire        div_q_neg = ~exe_div_uns & (exe_alu_src1[31] ^ exe_alu_src2[31]);
 wire        div_r_neg = ~exe_div_uns &  exe_alu_src1[31];
 
-// NonBlocking 模式无 tready：tvalid 打一拍即被接收；div_doing 保证一次只启动一单
+// One accepted operation; buffered completion also suppresses duplicate starts.
 wire        div_tvalid = resetn && exe_valid && exe_is_div && !div_doing &&
                          !div_result_valid && !exe_final_exc &&
                          !older_redirect_pending && !wb_redirect;
@@ -598,19 +599,19 @@ div_gen u_div (
     .m_axis_dout_tdata      (div_dout_tdata)
 );
 
-// IP 输出 [63:32]=商 [31:0]=余数；按符号恢复
+// Divider output: [63:32] quotient, [31:0] remainder; restore signed semantics.
 wire [31:0] quo_raw = div_dout_tdata[63:32];
 wire [31:0] rem_raw = div_dout_tdata[31:0];
 wire [31:0] quo     = div_q_neg ? ~quo_raw + 32'd1 : quo_raw;
 wire [31:0] rem     = div_r_neg ? ~rem_raw + 32'd1 : rem_raw;
-wire [31:0] div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
+assign div_result = (exe_is_mod_w | exe_is_mod_wu) ? rem : quo;
 
 // EXE 最终输出（ALU/除；乘法走 mul_prod_mem），下游 MEM 锁存与前递统一看 exe_result
 assign exe_result = exe_is_rdcnt ? exe_rdcnt_value :
                     exe_is_div ? (div_result_valid ? div_result_buf : div_result) : exe_alu_result;
 
 // 跳转判断：beq/bne 用 ALU sub 结果是否为 0；blt/bge/bltu/bgeu 复用 slt/sltu 结果最低位
-// 必须 exe_valid 门控：否则被冲刷进来的分支死数据会再次误触发重定向
+// Fire only when the branch itself advances, preserving bl/jirl under MEM stalls.
 // 位掩码：各分支类型 one-hot 互斥，条件位收集后归约或
 assign exe_rj_eq_rkd = (exe_alu_result == 32'b0);
 wire   exe_rj_lt_rkd = exe_alu_result[0];
@@ -623,7 +624,7 @@ assign exe_br_taken = exe_fire & ~exe_final_exc & ~older_redirect_pending &
                                  | exe_is_bgeu & ~exe_rj_lt_rkd
                                  | exe_is_jirl | exe_is_bl | exe_is_b);
 
-// 数据 RAM 请求（本拍发出，下拍 MEM 级收 data_sram_rdata）
+// Data request is accepted in EXE; its variable-latency response completes MEM.
 // 位掩码三选一：字节道移位（st.b 单道 / st.h 半字对齐双道 / st.w 全道），写数据车道复制免对位
 // One data transaction at a time. MEM is reserved on the acceptance edge.
 wire exe_is_mem = exe_res_from_mem || exe_mem_we;
