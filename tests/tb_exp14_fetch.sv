@@ -27,10 +27,15 @@ initial begin
  addr_ok=1;tick();addr_ok=0;
  redirect=1;target='h1c000200;data_ok=1;tick();redirect=0;data_ok=0;#1;
  check(req&&addr=='h1c000200&&!valid,"same-edge redirect/response stuck");
+ // Old address may be accepted on the same edge as redirect. It must drain.
+ redirect=1;target='h1c000300;addr_ok=1;tick();redirect=0;addr_ok=0;#1;
+ check(!req&&!valid,"redirect/address handshake was not tracked");
+ data_ok=1;rdata='hbadc0de;tick();data_ok=0;
+ check(req&&addr=='h1c000300&&!valid,"cancelled accepted address was delivered");
  redirect=1;target='h1c000003;tick();redirect=0;
  check(!req,"ADEF issued bus request");tick();
  check(valid&&pc=='h1c000003,"ADEF did not complete internally");
- $display("EXP14_FETCH_PASS stalled_address buffered_response drop simultaneous_redirect ADEF");$finish;
+ $display("EXP14_FETCH_PASS stalled_address buffered_response drop redirect_with_response redirect_with_accept ADEF");$finish;
 end
 initial begin #10000;$fatal(1,"fetch timeout");end
 endmodule

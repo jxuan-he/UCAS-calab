@@ -6,14 +6,14 @@
 ## exp14 本地工程入口
 
 取指和数据各最多一笔未响应事务；IF_PC 管理 EMPTY/WAIT/HAVE/DROP，缓存返回指令并排空被取消的请求。
-EXE 等地址接收，MEM 等读或写响应；分支与自身的 EXE 转移事件对齐，除法完成结果可在 MEM 反压期间保持。
+EXE 先寄存请求信息再等地址接收，MEM 等读或写响应；分支与自身的 EXE 转移事件对齐，除法完成结果可在 MEM 反压期间保持。
 load 仍在 WB 抽取/扩展，不增加 MEM load 前递。当前主接口以实验环境的至少一周期响应为前提。
 
 - 实现与验证说明：[docs/exp14_validation.md](docs/exp14_validation.md)。
 - 云端讲义位置：[docs/讲义云端索引.md](docs/讲义云端索引.md)。
 - 官方 SoC 与 Xilinx RAM IP 工程脚本：`scripts/exp14_vivado.tcl`。
 - Vivado 定向测试：`scripts/exp14_directed.ps1`。
-- 实验环境读取自仓库上一级的 `output/exp14/`，生成工程在 `build/exp14/project/exp14.xpr`。
+- 实验环境读取自仓库上一级的 `output/exp14/`，生成工程在 `build/exp14_final/project/exp14.xpr`。
 - 本地提交保留改造阶段；没有执行 push。exp13 基线为 `56138f0`。
 
 下面第 3～9 节主要保留早期同步 BRAM 设计的结构、优化和演进背景；其中取指常开、固定下一拍返回、

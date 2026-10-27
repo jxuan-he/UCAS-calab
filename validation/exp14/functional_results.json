@@ -1,0 +1,72 @@
+{
+  "tool": "Vivado 2025.2 XSIM",
+  "part": "xc7a200tfbg676-1",
+  "cpu_target_mhz": 100,
+  "rtl_sha256": {
+    "mycpu_top.v": "fe2fc771b42f92885a12ca0ddcce4582831d09f78cc354fd436bf1964eea7721",
+    "IF_PC.v": "84a79c2c4991288d9b5230524bfdcef655878a6d7e20811a15d42767f335c719",
+    "IDU.v": "afabecc6f288c60a54ecb0eb0499201b2da3d91ac0f82b42f1a215c26b179f03",
+    "CP0.v": "54e3e34a71a6cac3678752a49846154480eba1f9c3a8ab2fe1c343335f7a5b85",
+    "control.v": "bb69dec765337734ff91c7d66ed30751b8abb289ce2dbac5946f5d7ebcea00a4",
+    "regfile.v": "09247a7762d43de1efb832699dcb4f311ab1933c9145c3497950520e5c0eee13",
+    "alu.v": "26de841231a9400e3df3af1899fd7169798be861441ed14047ebb2202c450f0d",
+    "div_gen.v": "f22e824e3b6c4281504098cb44a0e5496013abde6c99520e774e569b1792a7ec"
+  },
+  "simulations": [
+    {
+      "seed": "550001",
+      "points": 58,
+      "cycles": 1839388,
+      "i_accepted": 119894,
+      "i_responded": 119894,
+      "d_accepted": 6167,
+      "d_responded": 6167,
+      "drop_count": 1859,
+      "log_sha256": "b00922e47fa7691b96735b7c0b2da7e2a8a5d14a615c4915799e653c13e69605"
+    },
+    {
+      "seed": "5500ff",
+      "points": 58,
+      "cycles": 430284,
+      "i_accepted": 143188,
+      "i_responded": 143187,
+      "d_accepted": 6167,
+      "d_responded": 6167,
+      "drop_count": 164,
+      "log_sha256": "8913ae8808ee395c94546ff7989f808c8b82e6ed68b6dddbdb4e1f152f08e280"
+    },
+    {
+      "seed": "5501ff",
+      "points": 58,
+      "cycles": 1009189,
+      "i_accepted": 124844,
+      "i_responded": 124844,
+      "d_accepted": 6167,
+      "d_responded": 6167,
+      "drop_count": 3587,
+      "log_sha256": "c6eb8cefba6b3ab22978e1c5ae54b5dde39b5450a0f5f417b32859c22a4487bf"
+    },
+    {
+      "seed": "551234",
+      "points": 58,
+      "cycles": 1835005,
+      "i_accepted": 119854,
+      "i_responded": 119854,
+      "d_accepted": 6167,
+      "d_responded": 6167,
+      "drop_count": 1802,
+      "log_sha256": "a00796d47e0fba61d7d75a37546d41f72ce044a722f06d0b971d548e273f1cc9"
+    },
+    {
+      "seed": "5527ff",
+      "points": 58,
+      "cycles": 1011338,
+      "i_accepted": 125046,
+      "i_responded": 125046,
+      "d_accepted": 6167,
+      "d_responded": 6167,
+      "drop_count": 3736,
+      "log_sha256": "c69faf3a592830bf05dae2e04144cb3f09a2afc9b1f5c72d287e34c023126892"
+    }
+  ]
+}

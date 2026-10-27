@@ -14,7 +14,9 @@ reg [1:0] state;
 reg [31:0] next_pc;
 wire adef = |next_pc[1:0];
 wire addr_fire = inst_sram_req && inst_sram_addr_ok;
-assign inst_sram_req = resetn && state==EMPTY && !redirect && !adef;
+// Do not put the backend redirect cone on the high-fanout RAM enable path.
+// An old request accepted on a redirect edge is recorded and drained below.
+assign inst_sram_req = resetn && state==EMPTY && !adef;
 assign inst_sram_addr = next_pc;
 assign fetch_valid = resetn && state==HAVE && !redirect;
 always @(posedge clk) begin
@@ -26,7 +28,8 @@ always @(posedge clk) begin
     end else if (redirect) begin
         next_pc <= redirect_target;
         // If data_ok is high, the cancelled response is consumed on this edge.
-        if ((state==WAIT || state==DROP) && !inst_sram_data_ok)
+        if (((state==WAIT || state==DROP) && !inst_sram_data_ok) ||
+            (state==EMPTY && addr_fire))
             state <= DROP;
         else state <= EMPTY;
     end else begin

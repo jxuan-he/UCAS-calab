@@ -1,0 +1,27 @@
+=== sim_550001.log ===
+----[18391315 ns] Number 8'd58 Functional Test Point PASS!!!
+EXP14_BUS_CHECKS cycles=1839388 I=119894/119894 D=6167/6167 dropped=1859
+Test end!
+----PASS!!!
+=== sim_5500ff.log ===
+----[4303755 ns] Number 8'd58 Functional Test Point PASS!!!
+EXP14_BUS_CHECKS cycles=430284 I=143188/143187 D=6167/6167 dropped=164
+Test end!
+----PASS!!!
+=== sim_5501ff.log ===
+----[10090835 ns] Number 8'd58 Functional Test Point PASS!!!
+EXP14_BUS_CHECKS cycles=1009189 I=124844/124844 D=6167/6167 dropped=3587
+Test end!
+----PASS!!!
+=== sim_551234.log ===
+----[18347215 ns] Number 8'd58 Functional Test Point PASS!!!
+EXP14_BUS_CHECKS cycles=1835005 I=119854/119854 D=6167/6167 dropped=1802
+Test end!
+----PASS!!!
+=== sim_5527ff.log ===
+----[10111735 ns] Number 8'd58 Functional Test Point PASS!!!
+EXP14_BUS_CHECKS cycles=1011338 I=125046/125046 D=6167/6167 dropped=3736
+Test end!
+----PASS!!!
+EXP14_FETCH_PASS stalled_address buffered_response drop redirect_with_response redirect_with_accept ADEF
+EXP14_STRESS_PASS cycles=701 div_starts=1 held=45 branch_wait=81 writes=3

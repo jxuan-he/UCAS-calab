@@ -626,20 +626,52 @@ assign exe_br_taken = exe_fire & ~exe_final_exc & ~older_redirect_pending &
 
 // Data request is accepted in EXE; its variable-latency response completes MEM.
 // 位掩码三选一：字节道移位（st.b 单道 / st.h 半字对齐双道 / st.w 全道），写数据车道复制免对位
-// One data transaction at a time. MEM is reserved on the acceptance edge.
+// Register the request descriptor before presenting it to the bus. This cuts
+// ALU/address-decode -> addr_ok -> EXE allowin and the high-fanout RAM enable cone.
 wire exe_is_mem = exe_res_from_mem || exe_mem_we;
+reg data_issue_valid;
+reg [31:0] data_addr_buf, data_wdata_buf;
+reg [3:0] data_wstrb_buf;
+reg [1:0] data_size_buf;
+reg data_wr_buf;
+wire [3:0] exe_store_wstrb =
+    ({4{exe_mem_we && exe_mem_size[0]}} & (4'b0001 << exe_alu_result[1:0])) |
+    ({4{exe_mem_we && exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1],1'b0})) |
+    ({4{exe_mem_we && !(|exe_mem_size)}} & 4'hf);
+wire [31:0] exe_store_wdata =
+    ({32{exe_mem_size[0]}} & {4{exe_rkd_value[7:0]}}) |
+    ({32{exe_mem_size[1]}} & {2{exe_rkd_value[15:0]}}) |
+    ({32{!(|exe_mem_size)}} & exe_rkd_value);
 wire data_addr_fire = data_sram_req && data_sram_addr_ok;
-assign data_sram_req = resetn && exe_valid && exe_is_mem && !mem_valid &&
-                       !exe_final_exc && !older_redirect_pending;
-assign data_sram_wr = exe_mem_we;
-assign data_sram_size = exe_mem_size[0] ? 2'd0 : exe_mem_size[1] ? 2'd1 : 2'd2;
-assign data_sram_wstrb = ({4{exe_mem_we && exe_mem_size[0]}} & (4'b0001 << exe_alu_result[1:0]))
-                       | ({4{exe_mem_we && exe_mem_size[1]}} & (4'b0011 << {exe_alu_result[1],1'b0}))
-                       | ({4{exe_mem_we && !(|exe_mem_size)}} & 4'hf);
-assign data_sram_addr  = exe_alu_result;
-assign data_sram_wdata = ({32{exe_mem_size[0]}} & {4{exe_rkd_value[ 7:0]}})
-                       | ({32{exe_mem_size[1]}} & {2{exe_rkd_value[15:0]}})
-                       | ({32{~|exe_mem_size  }} &  exe_rkd_value        );
+assign data_sram_req = resetn && data_issue_valid && !older_redirect_pending;
+assign data_sram_wr = data_wr_buf;
+assign data_sram_size = data_size_buf;
+assign data_sram_wstrb = data_wstrb_buf;
+assign data_sram_addr = data_addr_buf;
+assign data_sram_wdata = data_wdata_buf;
+
+always @(posedge clk) begin
+    if (!resetn) begin
+        data_issue_valid <= 1'b0;
+        data_addr_buf <= 32'b0;
+        data_wdata_buf <= 32'b0;
+        data_wstrb_buf <= 4'b0;
+        data_size_buf <= 2'b0;
+        data_wr_buf <= 1'b0;
+    end else if (wb_redirect || exe_fire) begin
+        data_issue_valid <= 1'b0;
+    end else if (!data_issue_valid && exe_valid && exe_is_mem &&
+                 !mem_valid && !exe_final_exc && !older_redirect_pending) begin
+        // Reserving while MEM is empty guarantees this older-safe instruction
+        // remains in EXE until its one request is accepted into MEM.
+        data_issue_valid <= 1'b1;
+        data_addr_buf <= exe_alu_result;
+        data_wdata_buf <= exe_store_wdata;
+        data_wstrb_buf <= exe_store_wstrb;
+        data_size_buf <= exe_mem_size[0] ? 2'd0 : exe_mem_size[1] ? 2'd1 : 2'd2;
+        data_wr_buf <= exe_mem_we;
+    end
+end
 
 // ================== 10. EXE -> MEM 级间寄存器 ==================
 

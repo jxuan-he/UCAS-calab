@@ -4,7 +4,7 @@
 set repo [file normalize [file join [file dirname [info script]] ..]]
 set envroot [file normalize [file join $repo .. output exp14]]
 set soc [file join $envroot soc_verify soc_hs_bram]
-set work [file join $repo build exp14]
+set work [file join $repo build exp14_final]
 set mode [lindex $argv 0]
 if {$mode eq ""} {set mode create}
 set seed [lindex $argv 1]
@@ -29,6 +29,8 @@ write_text [file join $work generated mycpu_tb.v] $tb
 
 if {$mode eq "create"} {
     create_project exp14 [file join $work project] -part xc7a200tfbg676-1 -force
+    set cache [file join $repo build exp14_pll project exp14.cache ip]
+    if {[file isdirectory $cache]} {config_ip_cache -use_cache_location $cache}
     set_property target_language Verilog [current_project]
     foreach f {mycpu_top.v IF_PC.v IDU.v CP0.v control.v regfile.v alu.v div_gen.v} {
         add_files [file join $repo $f]
@@ -55,7 +57,7 @@ if {$mode eq "create"} {
         }
     }
     create_ip -name clk_wiz -vendor xilinx.com -library ip -version 6.0 -module_name clk_pll
-    set_property -dict [list CONFIG.PRIM_IN_FREQ {100.000} \
+    set_property -dict [list CONFIG.PRIMITIVE {PLL} CONFIG.PRIM_IN_FREQ {100.000} \
         CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $mhz CONFIG.CLKOUT2_USED {true} \
         CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {100.000} \
         CONFIG.CLK_OUT1_PORT {cpu_clk} CONFIG.CLK_OUT2_PORT {timer_clk} \
@@ -89,8 +91,10 @@ if {$mode eq "create"} {
             }
             puts "EXP14_SIM_PASS seed=$runseed"
         }
-    } elseif {$mode eq "impl"} {
-        set_property CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $mhz [get_ips clk_pll]
+    } elseif {$mode eq "impl" || $mode eq "signoff"} {
+      if {$mode eq "impl"} {
+        # Preserve the original board XDC's PLLE2_ADV clock pin hierarchy.
+        set_property -dict [list CONFIG.PRIMITIVE {PLL} CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $mhz] [get_ips clk_pll]
         generate_target all [get_ips clk_pll]
         set_param general.maxThreads 8
         reset_run synth_1
@@ -101,7 +105,8 @@ if {$mode eq "create"} {
         set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
         launch_runs impl_1 -to_step route_design -jobs 8
         wait_on_run impl_1
-        if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {error "implementation failed"}
+        if {![string match {*route_design Complete*} [get_property STATUS [get_runs impl_1]]]} {error "routing did not complete"}
+      }
         open_run impl_1
         report_timing_summary -delay_type min_max -report_unconstrained -max_paths 10 \
             -file [file join $work reports timing_${mhz}MHz.rpt]
@@ -110,7 +115,11 @@ if {$mode eq "create"} {
         report_clocks -file [file join $work reports clocks_${mhz}MHz.rpt]
         check_timing -verbose -file [file join $work reports check_timing_${mhz}MHz.rpt]
         set p [get_timing_paths -delay_type max -max_paths 1]
-        puts "EXP14_ROUTE_WNS_MHZ=$mhz WNS=[get_property SLACK $p]"
+        set hp [get_timing_paths -delay_type min -max_paths 1]
+        set wns [get_property SLACK $p]
+        set whs [get_property SLACK $hp]
+        puts "EXP14_ROUTE_MHZ=$mhz WNS=$wns WHS=$whs"
+        if {$wns < 0 || $whs < 0} {error "routed timing failed; inspect timing report"}
     } else {error "unknown mode: $mode"}
     close_project
 }
