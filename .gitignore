@@ -1,8 +1,10 @@
 /build/
-/tmp/
 /output/
+/tmp/
+/.Xil/
 *.jou
 *.log
 *.pb
-/.Xil/
+*.bit
+*.dcp
 /dfx_runtime.txt
