@@ -58,10 +58,11 @@ reg        aw_pending;
 reg        w_pending;
 reg [31:0] read_data;
 
-// Capture one request per idle cycle, with data access taking priority.
-wire idle = aresetn && state == IDLE;
-assign data_addr_ok = idle;
-assign inst_addr_ok = idle && !data_req;
+// The previous AXI response has already been captured in COMPLETE. Deliver
+// it to the old owner while allowing the next request to enter the bridge.
+wire can_accept = aresetn && (state == IDLE || state == COMPLETE);
+assign data_addr_ok = can_accept;
+assign inst_addr_ok = can_accept && !data_req;
 
 assign data_data_ok = aresetn && state == COMPLETE && owner_data;
 assign inst_data_ok = aresetn && state == COMPLETE && !owner_data;
@@ -112,7 +113,7 @@ always @(posedge aclk) begin
         read_data  <= 32'b0;
     end else begin
         case (state)
-            IDLE: begin
+            IDLE, COMPLETE: begin
                 if (data_req && data_addr_ok) begin
                     owner_data <= 1'b1;
                     req_addr   <= data_addr;
@@ -127,6 +128,8 @@ always @(posedge aclk) begin
                     req_addr   <= inst_addr;
                     req_size   <= 2'd2;
                     state      <= READ_ADDR;
+                end else begin
+                    state      <= IDLE;
                 end
             end
 
@@ -159,7 +162,6 @@ always @(posedge aclk) begin
                     state <= COMPLETE;
             end
 
-            COMPLETE: state <= IDLE;
             default: state <= IDLE;
         endcase
     end
