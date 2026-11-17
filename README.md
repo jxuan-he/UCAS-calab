@@ -1,26 +1,37 @@
 # myCPU —— LoongArch32 六级流水线 CPU
 
-基于 LoongArch32 精简指令集的教学 CPU，Verilog 实现。根目录当前为 exp14 类 SRAM 握手接口版本，
-在 exp12/exp13 的异常、软件/定时器中断和稳定计数器基础上支持随机访存延迟。
+基于 LoongArch32 精简指令集的六级流水线教学 CPU，使用 Verilog 实现。当前根目录为 Exp16，CPU 内部通过类 SRAM 握手接口取指和访存，SoC 侧通过 AXI 接入。
 
-## exp14 本地工程入口
+## Exp15 / Exp16：AXI 接口
+
+- [mycpu_top.v](mycpu_top.v) 是 SoC 侧 AXI 顶层，连接 [mycpu_core.v](mycpu_core.v) 和 [sram_axi_bridge.v](sram_axi_bridge.v)。CPU 核沿用 Exp14 的取指和数据端口，通过 `req && addr_ok` 提交请求，再等待 `data_ok`。
+- **Exp15（`4627e9b`）** 接入单拍 AXI 读写。取指与数据同时请求时，数据优先。读回通过 `R` 通道完成。写地址 `AW` 与写数据 `W` 各自保持到握手，等到 `B` 握手后才向 CPU 返回完成信号。桥在 AXI 上最多保留一笔未完成事务。
+- **Exp16（`92cde11`）** 允许桥在 `COMPLETE` 周期交回旧响应时受理新请求。CPU 在该沿采样旧端口的 `data_ok`，桥在同一个沿锁存新请求，新请求从下一拍起进入 AXI 地址阶段。
+
+### 验证与演示
+
+Vivado 2025.2 XSim 使用 `5500FF`（无随机延迟）、`55FFFF`（短延迟）、`550055` 和 `55CC33`（长延迟），四组均通过 58/58 功能点，开启 trace 时逐条核对寄存器写回，结果一致。用同一长延迟种子 `550055` 对照时，Exp15 有 12,334 次旧响应交付时新请求还需等一拍，Exp16 的这 12,334 次都实现了同拍交接。
+
+箱号 41 的 Exp16 工程在 CPU 时钟 50 MHz 下完成布局布线，WNS 为 +0.979 ns，WHS 为 +0.024 ns，并生成 bit 文件。本地实验目录为仓库上一级的 `output/exp16/`，其中 `verification/build/project/exp16.xpr` 用于行为仿真，`现场演示.md` 记录了运行仿真、查看波形和下载 bit 的步骤。
+
+## Exp14 类 SRAM 握手版（历史记录）
 
 Vivado 2025.2 验证：五种随机种子各 58/58 功能点通过；100 MHz 布线 WNS=+0.209 ns、WHS=+0.051 ns，
 建立/保持失败端点均为 0。板级 I/O 与原时钟例外的约束范围见验证说明；未进行实体上板。
 
 取指和数据各最多一笔未响应事务；IF_PC 管理 EMPTY/WAIT/HAVE/DROP，缓存返回指令并排空被取消的请求。
 EXE 先寄存请求信息再等地址接收，MEM 等读或写响应；分支与自身的 EXE 转移事件对齐，除法完成结果可在 MEM 反压期间保持。
-load 仍在 WB 抽取/扩展，不增加 MEM load 前递。当前主接口以实验环境的至少一周期响应为前提。
+load 仍在 WB 抽取/扩展，不增加 MEM load 前递。Exp14 主接口以实验环境的至少一周期响应为前提。
 
-- 实现与验证说明：[docs/exp14_validation.md](docs/exp14_validation.md)。
-- 云端讲义位置：[docs/讲义云端索引.md](docs/讲义云端索引.md)。
-- 官方 SoC 与 Xilinx RAM IP 工程脚本：`scripts/exp14_vivado.tcl`。
+- 实现与验证说明：[docs/exp14_validation.md](https://github.com/jxuan-he/UCAS-calab/blob/441082227008bf2007d9e2f650d97ebedbed5401/docs/exp14_validation.md)。
+- 云端讲义位置：[docs/讲义云端索引.md](https://github.com/jxuan-he/UCAS-calab/blob/441082227008bf2007d9e2f650d97ebedbed5401/docs/%E8%AE%B2%E4%B9%89%E4%BA%91%E7%AB%AF%E7%B4%A2%E5%BC%95.md)。
+- 历史工程脚本（见 `4410822`）：`scripts/exp14_vivado.tcl`。
 - Vivado 定向测试：`scripts/exp14_directed.ps1`。
 - 实验环境读取自仓库上一级的 `output/exp14/`，生成工程在 `build/exp14_final/project/exp14.xpr`。
-- 本地提交保留改造阶段；没有执行 push。exp13 基线为 `56138f0`。
+- Exp13 基线为 `56138f0`，Exp14 的验证记录见 `4410822`。
 
 下面第 3～9 节主要保留早期同步 BRAM 设计的结构、优化和演进背景；其中取指常开、固定下一拍返回、
-旧 IF1 pending 逻辑不再描述当前 exp14 接口行为。当前实现和测试结果以 exp14 验证说明为准。
+旧 IF1 pending 逻辑属于早期 BRAM 接口。Exp14 的实现和测试结果以对应的验证说明为准。
 
 ## 1. 已支持的指令
 
@@ -45,7 +56,7 @@ load 仍在 WB 抽取/扩展，不增加 MEM load 前递。当前主接口以实
 `CRMD+PRMD+ECFG/ESTAT/ERA/BADV/稳定计数器/TCFG+TVAL+TICLR`；这些寄存器的格式和语义并不
 完全相同，因此 RTL 保留 LoongArch 架构名。
 
-## 2. 文件结构
+## 2. 文件结构（Exp14）
 
 ```
 mycpu_top.v    顶层：六级流水骨架，全部级间寄存器、握手、前递 MUX、访存接口
